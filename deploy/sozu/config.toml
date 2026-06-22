@@ -1,0 +1,37 @@
+# Minimal Sōzu config for the in-cluster add-on (data plane).
+#
+# Listeners are declared statically and activated at boot; the controller then
+# manages clusters/frontends/backends/certificates over the command socket
+# (shared with the controller container via an emptyDir at /run/sozu).
+#
+# Unprivileged listener ports (8080/8443) so the container needs no root and no
+# NET_BIND_SERVICE; the Service maps 80->8080 and 443->8443.
+
+command_socket = "/run/sozu/sozu.sock"
+command_buffer_size = 163_840
+max_command_buffer_size = 1_638_400
+
+log_level = "info"
+log_target = "stdout"
+
+worker_count = 2
+worker_automatic_restart = true
+handle_process_affinity = false
+
+# HTTP/2 minimum frame size; HTTPS listeners advertising h2 reject smaller.
+buffer_size = 16_393
+max_connections = 10_000
+
+pid_file_path = "/run/sozu/sozu.pid"
+
+# Listeners come up and start listening at boot.
+activate_listeners = true
+
+[[listeners]]
+protocol = "http"
+address = "0.0.0.0:8080"
+
+[[listeners]]
+protocol = "https"
+address = "0.0.0.0:8443"
+tls_versions = ["TLS_V12", "TLS_V13"]

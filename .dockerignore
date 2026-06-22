@@ -1,0 +1,8 @@
+/target
+/.git
+/.scratch
+/deploy
+/examples
+**/*.md
+**/snapshots
+.devcontainer

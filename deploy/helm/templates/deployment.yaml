@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sozu-gateway.fullname" . }}
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "sozu-gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sozu-gateway.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Roll the pod when the Sōzu config changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "sozu-gateway.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsUser: {{ .Values.runAsUser }}
+        runAsGroup: {{ .Values.runAsUser }}
+        fsGroup: {{ .Values.runAsUser }}
+      containers:
+        # --- data plane -------------------------------------------------------
+        - name: sozu
+          image: "{{ .Values.image.sozu.repository }}:{{ .Values.image.sozu.tag }}"
+          imagePullPolicy: {{ .Values.image.sozu.pullPolicy }}
+          args: ["start", "-c", "/etc/sozu/config.toml"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.sozu.httpPort }}
+            - name: https
+              containerPort: {{ .Values.sozu.httpsPort }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          volumeMounts:
+            - name: sozu-run
+              mountPath: /run/sozu
+            - name: sozu-config
+              mountPath: /etc/sozu
+          resources:
+            {{- toYaml .Values.resources.sozu | nindent 12 }}
+        # --- control plane ----------------------------------------------------
+        - name: controller
+          image: "{{ .Values.image.controller.repository }}:{{ .Values.image.controller.tag }}"
+          imagePullPolicy: {{ .Values.image.controller.pullPolicy }}
+          env:
+            - name: SOZU_GW_CLASS
+              value: {{ .Values.ingressClass.name | quote }}
+            - name: SOZU_GW_SOCKET
+              value: /run/sozu/sozu.sock
+            - name: SOZU_GW_HTTP_LISTENER
+              value: "0.0.0.0:{{ .Values.sozu.httpPort }}"
+            - name: SOZU_GW_HTTPS_LISTENER
+              value: "0.0.0.0:{{ .Values.sozu.httpsPort }}"
+            - name: SOZU_GW_DEBOUNCE_MS
+              value: {{ .Values.controller.debounceMs | quote }}
+            - name: SOZU_GW_RESYNC_SECS
+              value: {{ .Values.controller.resyncSecs | quote }}
+            - name: RUST_LOG
+              value: {{ .Values.controller.logLevel | quote }}
+          volumeMounts:
+            - name: sozu-run
+              mountPath: /run/sozu
+          resources:
+            {{- toYaml .Values.resources.controller | nindent 12 }}
+      volumes:
+        - name: sozu-run
+          emptyDir: {}
+        - name: sozu-config
+          configMap:
+            name: {{ include "sozu-gateway.fullname" . }}-sozu
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

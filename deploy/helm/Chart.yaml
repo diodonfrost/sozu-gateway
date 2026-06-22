@@ -1,0 +1,9 @@
+apiVersion: v2
+name: sozu-gateway
+description: Sōzu-based Ingress controller + API gateway add-on (Phase 1).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/diodonfrost/sozu-gateway
+sources:
+  - https://github.com/diodonfrost/sozu-gateway

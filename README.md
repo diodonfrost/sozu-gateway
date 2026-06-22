@@ -35,17 +35,49 @@ they share the command socket via an `emptyDir` volume in the same Pod.
 
 ## Local development
 
-Prereqs: Rust (stable), Docker. (Sōzu's release binary is musl-linked, so we run it via the
-`clevercloud/sozu:2.1.0` image.)
+Prereqs: Rust (stable), Docker, `kubectl`, `helm`. (Sōzu's release binary is musl-linked,
+so we run it via the `clevercloud/sozu:2.1.0` image.)
 
 ```bash
-cargo check --workspace        # build everything
-cargo test --workspace         # unit / golden tests (Translator, Builder)
-
-# Étape-1 protocol probe: starts a live Sōzu + a backend, applies config over the
-# socket, and proves HTTP/HTTPS traffic flows (curl + openssl SNI check).
-bash .scratch/run-probe.sh
+make build          # cargo build --workspace
+make test           # unit + golden tests (Translator, Builder, Agent)
+make lint           # cargo fmt --check + clippy -D warnings
+make docker-build   # build the controller image
+make helm-lint      # helm lint + template
 ```
 
-The end-to-end on a real cluster (deploy the add-on + a demo app + Ingress) is wired up
-in Étape 5 (`make e2e` / `justfile`).
+## End-to-end on a Kubernetes cluster
+
+`make e2e` (→ [scripts/e2e.sh](scripts/e2e.sh)) runs the whole add-on on your current
+kube-context and verifies traffic:
+
+1. builds the controller image and pushes it to an **ephemeral, anonymous registry**
+   (`ttl.sh`) so no registry credentials are needed — override with `IMAGE=...` to use
+   your own;
+2. `helm install`s the add-on (controller + Sōzu in one Pod, `Service type=LoadBalancer`,
+   `IngressClass sozu`, RBAC, Sōzu `ConfigMap`);
+3. deploys the [demo app](examples/demo-app.yaml) (whoami) + a TLS Secret + an Ingress;
+4. curls HTTP and HTTPS through Sōzu (200 + correct SNI cert) and checks that deleting the
+   Ingress hot-removes the route (404).
+
+```bash
+make e2e                                  # uses ttl.sh
+IMAGE=ghcr.io/you/sozu-gw-controller:test make e2e
+```
+
+Deploy manually instead:
+
+```bash
+helm upgrade --install sozu-gateway deploy/helm -n sozu-system --create-namespace \
+  --set image.controller.repository=<your-repo> --set image.controller.tag=<tag>
+```
+
+## Architecture validation
+
+The Sōzu command protocol is verified against a live Sōzu, not just read from source — see
+[PROTOCOL.md](PROTOCOL.md). Two scratch harnesses reproduce it locally (Sōzu in Docker):
+
+```bash
+bash .scratch/run-probe.sh                       # raw protocol probe
+RUN_EXAMPLE=agent_smoke bash .scratch/run-probe.sh   # IR -> Translator -> Agent
+```

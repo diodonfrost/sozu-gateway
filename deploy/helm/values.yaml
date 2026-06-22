@@ -1,0 +1,56 @@
+# Default values for the sozu-gateway add-on.
+
+replicaCount: 1
+
+image:
+  controller:
+    repository: sozu-gw-controller
+    tag: dev
+    pullPolicy: IfNotPresent
+  sozu:
+    repository: clevercloud/sozu
+    tag: "2.1.0"
+    pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+# Singleton add-on: keep resource names stable regardless of release name.
+fullnameOverride: "sozu-gateway"
+
+# IngressClass this add-on creates and owns.
+ingressClass:
+  name: sozu
+  # Mark as the cluster's default IngressClass (handles class-less Ingresses).
+  default: false
+  controllerValue: sozu.io/gateway-controller
+
+controller:
+  logLevel: info          # RUST_LOG (e.g. "info", "info,sozu_gw_controller=debug")
+  debounceMs: 500         # coalesce bursts of watch events
+  resyncSecs: 60          # periodic full resync
+
+# Sōzu data-plane sidecar. Unprivileged listener ports (no root / NET_BIND).
+sozu:
+  httpPort: 8080
+  httpsPort: 8443
+  workerCount: 2
+  logLevel: info
+
+service:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  httpPort: 80
+  httpsPort: 443
+  annotations: {}
+
+# Both containers run as this uid so they can share the command socket on the
+# emptyDir volume.
+runAsUser: 1000
+
+resources:
+  controller: {}
+  sozu: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
