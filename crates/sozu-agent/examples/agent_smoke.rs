@@ -79,15 +79,13 @@ async fn main() -> Result<()> {
     let handle = SozuAgentHandle::spawn(&sock).context("spawn agent")?;
 
     // First reconcile: shadow is empty -> apply the full desired state.
-    let shadow = tr::desired_state(&ir::Ir::default())?;
-    let desired = tr::desired_state(&model)?;
-    let requests = tr::diff(&shadow, &desired);
+    let requests = tr::reconcile(&ir::Ir::default(), &model)?;
     println!("[agent_smoke] applying {} requests", requests.len());
     handle.apply(requests).await.context("apply full state")?;
     println!("[agent_smoke] full state applied OK");
 
     // Second reconcile from the updated shadow: must be a no-op (idempotent).
-    let again = tr::diff(&desired, &desired);
+    let again = tr::reconcile(&model, &model)?;
     println!(
         "[agent_smoke] second diff has {} requests (expect 0)",
         again.len()

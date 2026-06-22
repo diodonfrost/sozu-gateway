@@ -1,11 +1,12 @@
-//! Golden-file tests for the Translator (IR -> Sōzu commands, and diffs).
+//! Golden + property tests for the Translator (IR -> Sōzu commands, and diffs).
 //!
-//! Snapshots are JSON of the emitted `Vec<Request>`. Determinism comes from the
-//! Translator's canonical tier ordering; cert tests use real PEM fixtures
-//! because `ConfigState` parses certificates (fingerprint + SNI names).
+//! Snapshots are JSON of the emitted `Vec<Request>`; determinism comes from the
+//! canonical tier ordering. Cert tests use real PEM fixtures because Sōzu parses
+//! certificates (fingerprint + SNI names).
 
 use std::net::SocketAddr;
 
+use sozu_command_lib::proto::command::request::RequestType;
 use sozu_gw_ir as ir;
 use sozu_gw_translator as tr;
 
@@ -47,12 +48,12 @@ fn frontend(host: &str, path: ir::PathMatch, cluster_id: &str, tls: bool) -> ir:
     }
 }
 
-fn cert_a() -> ir::Certificate {
+fn cert(certificate: &str, key: &str) -> ir::Certificate {
     ir::Certificate {
         listener: addr("0.0.0.0:443"),
-        certificate: CERT_A.to_string(),
+        certificate: certificate.to_string(),
         chain: vec![],
-        key: KEY_A.to_string(),
+        key: key.to_string(),
         names: vec!["app.example.com".to_string()],
     }
 }
@@ -90,13 +91,8 @@ fn sample_ir() -> ir::Ir {
                 false,
             ),
         ],
-        certificates: vec![cert_a()],
+        certificates: vec![cert(CERT_A, KEY_A)],
     }
-}
-
-/// The empty data-plane state (no naming of `ConfigState` needed in tests).
-fn empty_state() -> sozu_command_lib::state::ConfigState {
-    tr::desired_state(&ir::Ir::default()).expect("empty IR folds")
 }
 
 #[test]
@@ -105,80 +101,76 @@ fn ir_to_requests_full() {
 }
 
 #[test]
-fn diff_from_empty_equals_full_adds() {
-    let desired = tr::desired_state(&sample_ir()).expect("fold sample IR");
-    insta::assert_json_snapshot!(tr::diff(&empty_state(), &desired));
+fn reconcile_from_empty_equals_full_adds() {
+    let reqs = tr::reconcile(&ir::Ir::default(), &sample_ir()).expect("reconcile");
+    insta::assert_json_snapshot!(reqs);
 }
 
 #[test]
-fn diff_is_idempotent() {
-    let desired = tr::desired_state(&sample_ir()).expect("fold sample IR");
+fn reconcile_is_idempotent() {
+    let sample = sample_ir();
     assert!(
-        tr::diff(&desired, &desired).is_empty(),
-        "re-applying an unchanged state must emit no commands"
+        tr::reconcile(&sample, &sample)
+            .expect("reconcile")
+            .is_empty(),
+        "re-applying an unchanged IR must emit no commands"
     );
 }
 
 #[test]
-fn diff_scale_up_emits_single_add_backend() {
-    let before = tr::desired_state(&sample_ir()).expect("fold");
-    let mut ir2 = sample_ir();
-    ir2.backends.push(backend("app", "10.0.0.3:8080", None));
-    let after = tr::desired_state(&ir2).expect("fold");
-
-    let reqs = tr::diff(&before, &after);
+fn reconcile_scale_up_emits_single_add_backend() {
+    let mut after = sample_ir();
+    after.backends.push(backend("app", "10.0.0.3:8080", None));
+    let reqs = tr::reconcile(&sample_ir(), &after).expect("reconcile");
     assert_eq!(reqs.len(), 1, "scale-up should be exactly one request");
     insta::assert_json_snapshot!(reqs);
 }
 
 #[test]
-fn diff_scale_down_emits_single_remove_backend() {
-    let before = tr::desired_state(&sample_ir()).expect("fold");
-    let mut ir2 = sample_ir();
-    ir2.backends.retain(|b| b.address != addr("10.0.0.2:8080"));
-    let after = tr::desired_state(&ir2).expect("fold");
-
-    let reqs = tr::diff(&before, &after);
+fn reconcile_scale_down_emits_single_remove_backend() {
+    let mut after = sample_ir();
+    after
+        .backends
+        .retain(|b| b.address != addr("10.0.0.2:8080"));
+    let reqs = tr::reconcile(&sample_ir(), &after).expect("reconcile");
     assert_eq!(reqs.len(), 1, "scale-down should be exactly one request");
     insta::assert_json_snapshot!(reqs);
 }
 
 #[test]
-fn diff_cert_rotation_adds_new_before_removing_old() {
-    use sozu_command_lib::proto::command::request::RequestType;
+fn reconcile_cert_rotation_is_single_replace() {
+    let mut after = sample_ir();
+    after.certificates = vec![cert(CERT_B, KEY_B)]; // same listener+names, new key/cert
+    let reqs = tr::reconcile(&sample_ir(), &after).expect("reconcile");
 
-    let before = tr::desired_state(&sample_ir()).expect("fold");
-    let mut ir2 = sample_ir();
-    ir2.certificates = vec![ir::Certificate {
-        certificate: CERT_B.to_string(),
-        key: KEY_B.to_string(),
-        ..cert_a()
-    }];
-    let after = tr::desired_state(&ir2).expect("fold");
-
-    let reqs = tr::diff(&before, &after);
-
-    let add_pos = reqs
-        .iter()
-        .position(|r| matches!(r.request_type, Some(RequestType::AddCertificate(_))));
-    let remove_pos = reqs
-        .iter()
-        .position(|r| matches!(r.request_type, Some(RequestType::RemoveCertificate(_))));
-    assert!(add_pos.is_some(), "rotation must add the new certificate");
-    assert!(
-        remove_pos.is_some(),
-        "rotation must remove the old certificate"
+    assert_eq!(
+        reqs.len(),
+        1,
+        "rotation should be a single ReplaceCertificate"
     );
     assert!(
-        add_pos < remove_pos,
-        "the new certificate must be added before the old one is removed (no TLS gap)"
+        matches!(
+            reqs[0].request_type,
+            Some(RequestType::ReplaceCertificate(_))
+        ),
+        "rotation with identical (listener, names) must use ReplaceCertificate (no TLS gap)"
     );
     insta::assert_json_snapshot!(reqs);
 }
 
 #[test]
-fn diff_add_new_route() {
-    // Start from just the `app` HTTP route, then add the full sample.
+fn reconcile_remove_all_includes_remove_certificate() {
+    // This is the case that tripped sozu's ConfigState::diff debug-assert; our
+    // own certificate diff must handle it without panicking.
+    let reqs = tr::reconcile(&sample_ir(), &ir::Ir::default()).expect("reconcile");
+    assert!(reqs
+        .iter()
+        .any(|r| matches!(r.request_type, Some(RequestType::RemoveCertificate(_)))));
+    insta::assert_json_snapshot!(reqs);
+}
+
+#[test]
+fn reconcile_add_new_route() {
     let small = ir::Ir {
         clusters: vec![cluster("app", ir::LbAlgorithm::RoundRobin, false)],
         backends: vec![backend("app", "10.0.0.1:8080", None)],
@@ -190,7 +182,5 @@ fn diff_add_new_route() {
         )],
         certificates: vec![],
     };
-    let before = tr::desired_state(&small).expect("fold small");
-    let after = tr::desired_state(&sample_ir()).expect("fold full");
-    insta::assert_json_snapshot!(tr::diff(&before, &after));
+    insta::assert_json_snapshot!(tr::reconcile(&small, &sample_ir()).expect("reconcile"));
 }

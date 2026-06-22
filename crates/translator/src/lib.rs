@@ -1,23 +1,28 @@
 //! Translator: pure IR → Sōzu protobuf commands.
 //!
-//! Two responsibilities, both side-effect free and golden-file tested:
-//!  1. map the IR to the full set of `Add*` requests that express the desired
-//!     state (and fold them into a `ConfigState`);
-//!  2. diff the desired `ConfigState` against the last-applied (shadow) state,
-//!     reusing Sōzu's own `ConfigState::diff` so the semantics match the data
-//!     plane exactly, and emit only the minimal mutations.
+//! Side-effect free and golden-file tested. Two diff strategies, deliberately
+//! split:
+//!  - **Routing graph** (clusters / backends / frontends): we reuse Sōzu's own
+//!    `ConfigState::diff`, so the semantics match the data plane exactly.
+//!  - **Certificates**: we diff them ourselves, by fingerprint. This (a) lets us
+//!    emit `ReplaceCertificate` for zero-gap rotation, and (b) avoids a
+//!    debug-assert in sozu-command-lib 2.1.0 that fires when `ConfigState::diff`
+//!    removes the last certificate at a listener address (an empty cert bucket
+//!    is left behind and the replay check is not normalised for it).
 //!
-//! Request ordering is canonicalised into **dependency-safe tiers** (adds:
-//! clusters → backends → certificates → frontends; removes in reverse; a new
-//! certificate is added before the old one is removed, so rotation has no gap).
-//! The same ordering is used for sending and for snapshots, which also makes the
-//! otherwise HashSet-ordered `diff` output deterministic.
+//! Output is canonicalised into dependency-safe tiers (adds: clusters →
+//! backends → certificates → frontends; removes in reverse; a new/replacement
+//! certificate lands before the old one is removed → no TLS gap). This also
+//! makes the otherwise HashSet-ordered routing diff deterministic.
 #![forbid(unsafe_code)]
+
+use std::collections::{BTreeSet, HashSet};
+use std::net::SocketAddr;
 
 use sozu_command_lib::proto::command::{
     request::RequestType, AddBackend, AddCertificate, CertificateAndKey, Cluster,
-    LoadBalancingAlgorithms, LoadBalancingParams, PathRule, PathRuleKind, Request,
-    RequestHttpFrontend, RulePosition,
+    LoadBalancingAlgorithms, LoadBalancingParams, PathRule, PathRuleKind, RemoveCertificate,
+    ReplaceCertificate, Request, RequestHttpFrontend, RulePosition,
 };
 use sozu_command_lib::state::ConfigState;
 use sozu_gw_ir as ir;
@@ -27,10 +32,12 @@ use thiserror::Error;
 pub enum TranslatorError {
     #[error("failed to fold request into ConfigState: {0}")]
     Dispatch(String),
+    #[error("invalid certificate (cannot compute fingerprint): {0}")]
+    Certificate(String),
 }
 
 // ----------------------------------------------------------------------------
-// IR element -> single request
+// IR element -> request payloads
 // ----------------------------------------------------------------------------
 
 fn lb_algorithm(algo: ir::LbAlgorithm) -> i32 {
@@ -96,29 +103,42 @@ fn frontend_request(f: &ir::Frontend) -> Request {
     }
 }
 
-fn certificate_request(c: &ir::Certificate) -> Request {
+fn certificate_and_key(c: &ir::Certificate) -> CertificateAndKey {
+    CertificateAndKey {
+        certificate: c.certificate.clone(),
+        certificate_chain: c.chain.clone(),
+        key: c.key.clone(),
+        versions: vec![], // empty => server default (TLS 1.2 + 1.3)
+        names: c.names.clone(),
+    }
+}
+
+fn add_certificate_request(c: &ir::Certificate) -> Request {
     RequestType::AddCertificate(AddCertificate {
         address: c.listener.into(),
-        certificate: CertificateAndKey {
-            certificate: c.certificate.clone(),
-            certificate_chain: c.chain.clone(),
-            key: c.key.clone(),
-            versions: vec![], // empty => server default (TLS 1.2 + 1.3)
-            names: c.names.clone(),
-        },
+        certificate: certificate_and_key(c),
         expired_at: None,
     })
     .into()
+}
+
+/// Lower-case hex fingerprint of a certificate's leaf, matching the form Sōzu
+/// stores and `RemoveCertificate` expects.
+fn fingerprint(c: &ir::Certificate) -> Result<String, TranslatorError> {
+    let bytes = sozu_command_lib::certificate::calculate_fingerprint(c.certificate.as_bytes())
+        .map_err(|e| TranslatorError::Certificate(format!("{e:?}")))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Identity for rotation detection: same listener + same SNI name set.
+fn cert_key(c: &ir::Certificate) -> (SocketAddr, BTreeSet<String>) {
+    (c.listener, c.names.iter().cloned().collect())
 }
 
 // ----------------------------------------------------------------------------
 // Dependency-safe canonical ordering
 // ----------------------------------------------------------------------------
 
-/// Tier of a request in dependency-safe apply order. Lower tiers are applied
-/// first. Adds create dependencies bottom-up (cluster before backend before
-/// frontend); removes tear down top-down; a replacement cert is added (tier 3)
-/// before the stale one is removed (tier 8), so TLS never has a gap.
 fn tier(req: &Request) -> u8 {
     match &req.request_type {
         Some(RequestType::AddHttpListener(_))
@@ -139,8 +159,7 @@ fn tier(req: &Request) -> u8 {
     }
 }
 
-/// Reorder requests into dependency-safe tiers with a deterministic secondary
-/// key (stable JSON), so the output is both correct to apply and snapshot-stable.
+/// Reorder into dependency-safe tiers with a deterministic secondary key.
 fn canonicalize(mut requests: Vec<Request>) -> Vec<Request> {
     requests.sort_by_cached_key(|req| {
         let key = serde_json::to_string(req).unwrap_or_default();
@@ -150,26 +169,19 @@ fn canonicalize(mut requests: Vec<Request>) -> Vec<Request> {
 }
 
 // ----------------------------------------------------------------------------
-// Public API
+// Diff building blocks
 // ----------------------------------------------------------------------------
 
-/// The full desired state expressed as `Add*` requests, in canonical order.
-pub fn ir_to_requests(ir: &ir::Ir) -> Vec<Request> {
-    let mut requests = Vec::with_capacity(
-        ir.clusters.len() + ir.backends.len() + ir.frontends.len() + ir.certificates.len(),
-    );
+/// Fold the IR's routing graph (clusters/backends/frontends, NO certificates)
+/// into a `ConfigState`. Certificates are handled separately, so they never
+/// enter the `ConfigState::diff` path.
+fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
+    let mut requests: Vec<Request> = Vec::new();
     requests.extend(ir.clusters.iter().map(cluster_request));
     requests.extend(ir.backends.iter().map(backend_request));
     requests.extend(ir.frontends.iter().map(frontend_request));
-    requests.extend(ir.certificates.iter().map(certificate_request));
-    canonicalize(requests)
-}
-
-/// Fold the IR into a `ConfigState` (the desired data-plane state). Dispatching
-/// in canonical order guarantees clusters exist before their backends.
-pub fn desired_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
     let mut state = ConfigState::new();
-    for req in ir_to_requests(ir) {
+    for req in canonicalize(requests) {
         state
             .dispatch(&req)
             .map_err(|e| TranslatorError::Dispatch(e.to_string()))?;
@@ -177,20 +189,99 @@ pub fn desired_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
     Ok(state)
 }
 
-/// Minimal, dependency-safe requests to converge `current` → `desired`,
-/// reusing Sōzu's own diff. Idempotent: `diff(&s, &s)` is empty.
-pub fn diff(current: &ConfigState, desired: &ConfigState) -> Vec<Request> {
-    canonicalize(current.diff(desired))
+/// Minimal certificate requests to converge `previous` → `desired`, pairing a
+/// removed+added cert that share (listener, names) into a single
+/// `ReplaceCertificate` (zero-gap rotation).
+fn certificate_requests(
+    previous: &[ir::Certificate],
+    desired: &[ir::Certificate],
+) -> Result<Vec<Request>, TranslatorError> {
+    let prev: Vec<(String, &ir::Certificate)> = previous
+        .iter()
+        .map(|c| Ok((fingerprint(c)?, c)))
+        .collect::<Result<_, TranslatorError>>()?;
+    let des: Vec<(String, &ir::Certificate)> = desired
+        .iter()
+        .map(|c| Ok((fingerprint(c)?, c)))
+        .collect::<Result<_, TranslatorError>>()?;
+
+    let prev_fps: HashSet<&str> = prev.iter().map(|(f, _)| f.as_str()).collect();
+    let des_fps: HashSet<&str> = des.iter().map(|(f, _)| f.as_str()).collect();
+
+    let removed: Vec<(String, &ir::Certificate)> = prev
+        .iter()
+        .filter(|(f, _)| !des_fps.contains(f.as_str()))
+        .map(|(f, c)| (f.clone(), *c))
+        .collect();
+    let added: Vec<(String, &ir::Certificate)> = des
+        .iter()
+        .filter(|(f, _)| !prev_fps.contains(f.as_str()))
+        .map(|(f, c)| (f.clone(), *c))
+        .collect();
+
+    let mut out = Vec::new();
+    let mut used = vec![false; removed.len()];
+
+    for (_new_fp, new_cert) in &added {
+        // Rotation: a removed cert with the same (listener, names) -> Replace.
+        if let Some(idx) = removed
+            .iter()
+            .enumerate()
+            .position(|(i, (_, old))| !used[i] && cert_key(old) == cert_key(new_cert))
+        {
+            used[idx] = true;
+            out.push(
+                RequestType::ReplaceCertificate(ReplaceCertificate {
+                    address: new_cert.listener.into(),
+                    new_certificate: certificate_and_key(new_cert),
+                    old_fingerprint: removed[idx].0.clone(),
+                    new_expired_at: None,
+                })
+                .into(),
+            );
+        } else {
+            out.push(add_certificate_request(new_cert));
+        }
+    }
+    for (i, (old_fp, old_cert)) in removed.iter().enumerate() {
+        if !used[i] {
+            out.push(
+                RequestType::RemoveCertificate(RemoveCertificate {
+                    address: old_cert.listener.into(),
+                    fingerprint: old_fp.clone(),
+                })
+                .into(),
+            );
+        }
+    }
+    Ok(out)
 }
 
-/// Convenience: compute both the new shadow state and the minimal requests to
-/// converge a `current` shadow towards the desired IR. The caller swaps its
-/// shadow to the returned state only after the requests apply successfully.
-pub fn reconcile(
-    current: &ConfigState,
-    ir: &ir::Ir,
-) -> Result<(ConfigState, Vec<Request>), TranslatorError> {
-    let desired = desired_state(ir)?;
-    let requests = diff(current, &desired);
-    Ok((desired, requests))
+// ----------------------------------------------------------------------------
+// Public API
+// ----------------------------------------------------------------------------
+
+/// The full desired state expressed as `Add*` requests, in canonical order.
+/// Pure mapping (no diff/replay) — handy for a fresh "apply everything" and for
+/// golden snapshots of the IR → command mapping.
+pub fn ir_to_requests(ir: &ir::Ir) -> Vec<Request> {
+    let mut requests = Vec::new();
+    requests.extend(ir.clusters.iter().map(cluster_request));
+    requests.extend(ir.backends.iter().map(backend_request));
+    requests.extend(ir.frontends.iter().map(frontend_request));
+    requests.extend(ir.certificates.iter().map(add_certificate_request));
+    canonicalize(requests)
+}
+
+/// Minimal, dependency-safe requests to converge a `previous` applied IR towards
+/// the `desired` IR. Idempotent: `reconcile(&ir, &ir)` is empty. The controller
+/// keeps `previous` as its shadow and swaps it to `desired` only after a
+/// successful apply.
+pub fn reconcile(previous: &ir::Ir, desired: &ir::Ir) -> Result<Vec<Request>, TranslatorError> {
+    let mut requests = routing_state(previous)?.diff(&routing_state(desired)?);
+    requests.extend(certificate_requests(
+        &previous.certificates,
+        &desired.certificates,
+    )?);
+    Ok(canonicalize(requests))
 }

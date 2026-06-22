@@ -1,0 +1,175 @@
+---
+source: crates/translator/tests/golden.rs
+expression: reqs
+---
+[
+  {
+    "request_type": {
+      "REMOVE_HTTPS_FRONTEND": {
+        "cluster_id": "app",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 443
+        },
+        "hostname": "app.example.com",
+        "path": {
+          "kind": 0,
+          "value": "/"
+        },
+        "method": null,
+        "position": 2,
+        "tags": {},
+        "redirect": null,
+        "required_auth": null,
+        "redirect_scheme": null,
+        "redirect_template": null,
+        "rewrite_host": null,
+        "rewrite_path": null,
+        "rewrite_port": null,
+        "headers": [],
+        "hsts": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_HTTP_FRONTEND": {
+        "cluster_id": "api",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 80
+        },
+        "hostname": "api.example.com",
+        "path": {
+          "kind": 2,
+          "value": "/v1"
+        },
+        "method": null,
+        "position": 2,
+        "tags": {},
+        "redirect": null,
+        "required_auth": null,
+        "redirect_scheme": null,
+        "redirect_template": null,
+        "rewrite_host": null,
+        "rewrite_path": null,
+        "rewrite_port": null,
+        "headers": [],
+        "hsts": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_HTTP_FRONTEND": {
+        "cluster_id": "app",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 80
+        },
+        "hostname": "app.example.com",
+        "path": {
+          "kind": 0,
+          "value": "/"
+        },
+        "method": null,
+        "position": 2,
+        "tags": {},
+        "redirect": null,
+        "required_auth": null,
+        "redirect_scheme": null,
+        "redirect_template": null,
+        "rewrite_host": null,
+        "rewrite_path": null,
+        "rewrite_port": null,
+        "headers": [],
+        "hsts": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_BACKEND": {
+        "cluster_id": "api",
+        "backend_id": "api-10-0-1-1-9090",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 167772417
+            }
+          },
+          "port": 9090
+        }
+      }
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_BACKEND": {
+        "cluster_id": "app",
+        "backend_id": "app-10-0-0-1-8080",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 167772161
+            }
+          },
+          "port": 8080
+        }
+      }
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_BACKEND": {
+        "cluster_id": "app",
+        "backend_id": "app-10-0-0-2-8080",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 167772162
+            }
+          },
+          "port": 8080
+        }
+      }
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_CLUSTER": "api"
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_CLUSTER": "app"
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_CERTIFICATE": {
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 443
+        },
+        "fingerprint": "2e6f2ec7b75dd33cd3e83b6d5a7d0954d74348d44c5a90f23133b13f65a0d15b"
+      }
+    }
+  }
+]
