@@ -21,14 +21,15 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses", "ingressclasses"]
     verbs: ["get", "list", "watch"]
-  # Phase 2 status reporting (Accepted/Programmed). Harmless to grant now.
+{{- if .Values.rbac.allowStatusWrites }}
+  # Ingress status reporting (Phase 2). Off by default for least-privilege.
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses/status"]
     verbs: ["update", "patch"]
-  # Leader election / event emission headroom for future HA.
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

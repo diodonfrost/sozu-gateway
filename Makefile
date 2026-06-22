@@ -1,24 +1,28 @@
-# sozu-gateway — developer + CI tasks.
-# (A justfile equivalent could wrap these; Make is used since it's preinstalled.)
+# sozu-gateway — developer + release tasks.
 
-IMAGE ?= sozu-gw-controller:dev
+# Container image + chart artifacts are published to ghcr.io under the
+# CleverCloud org (see .github/workflows/release.yaml).
+IMAGE ?= ghcr.io/clevercloud/sozu-gateway
+TAG ?= dev
+# Helm chart SemVer derived from TAG (v0.2.0 -> 0.2.0; dev -> dev).
+CHART_VERSION ?= $(TAG:v%=%)
+CHART ?= charts/sozu-gateway
 HELM_RELEASE ?= sozu-gateway
 HELM_NS ?= sozu-system
 
-.PHONY: build test lint fmt fmt-check clippy docker-build helm-lint helm-template e2e clean
+.PHONY: all build test lint fmt fmt-check clippy image chart-lint chart-package e2e clean help
 
-## Build the whole workspace.
-build:
+all: build test ## Build + test
+
+build: ## Build the whole workspace
 	cargo build --workspace
 
-## Unit + golden tests.
-test:
+test: ## Unit + golden tests
 	cargo test --workspace
 
-## fmt check + clippy with warnings denied (CI gate).
-lint: fmt-check clippy
+lint: fmt-check clippy ## CI gate: fmt check + clippy -D warnings
 
-fmt:
+fmt: ## Format
 	cargo fmt
 
 fmt-check:
@@ -27,25 +31,29 @@ fmt-check:
 clippy:
 	cargo clippy --workspace --all-targets -- -D warnings
 
-## Build the controller container image.
-docker-build:
-	docker build -t $(IMAGE) .
+image: ## Build the controller container image ($(IMAGE):$(TAG))
+	docker build -t $(IMAGE):$(TAG) .
 
-## Validate the Helm chart renders and lints.
-helm-lint:
-	helm lint deploy/helm
+chart-lint: ## Lint + render the Helm chart
+	helm lint $(CHART)
+	helm template $(HELM_RELEASE) $(CHART) > /dev/null
+	helm template $(HELM_RELEASE) $(CHART) --set rbac.allowStatusWrites=true > /dev/null
 
-helm-template:
-	helm template $(HELM_RELEASE) deploy/helm
+chart-package: ## Package the Helm chart into dist/ (use TAG=v<semver>)
+	mkdir -p dist
+	helm package $(CHART) --version $(CHART_VERSION) --app-version $(TAG) --destination dist
 
 ## Full end-to-end on the current kube-context: build+push image, install the
 ## add-on, deploy the demo app, and verify HTTP/HTTPS traffic through Sōzu.
-## Override IMAGE to use your own registry; defaults to an ephemeral ttl.sh tag.
-e2e:
+## Defaults to an ephemeral ttl.sh image so no registry credentials are needed.
+e2e: ## Run the in-cluster end-to-end test
 	bash scripts/e2e.sh
 
-## Tear down the e2e resources.
-clean:
+clean: ## Tear down e2e resources + cargo clean
 	-helm uninstall $(HELM_RELEASE) -n $(HELM_NS)
 	-kubectl delete -f examples/demo-app.yaml
+	rm -rf dist
 	cargo clean
+
+help:
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "%-16s %s\n", $$1, $$2}'

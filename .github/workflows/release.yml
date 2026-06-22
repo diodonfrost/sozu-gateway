@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push the image and Helm chart to ghcr.io
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and push controller image
+        run: |
+          # ghcr.io requires a lowercase repository name.
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/sozu-gateway"
+          TAG="${GITHUB_REF_NAME}"
+          make image IMAGE="$IMAGE" TAG="$TAG"
+          docker push "$IMAGE:$TAG"
+
+      # Chart steps only run for v* tags: a workflow_dispatch run from a branch
+      # has a non-semver GITHUB_REF_NAME that `helm package` would reject.
+      - name: Log Helm in to GitHub Container Registry
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # docker login does not authenticate helm — it keeps its own cred store.
+        run: echo "$GITHUB_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Package and push Helm chart
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          # helm push appends the chart name, so the chart lands at
+          # oci://ghcr.io/<owner>/sozu-gateway.
+          REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          TAG="${GITHUB_REF_NAME}"
+          make chart-package TAG="$TAG"
+          helm push "dist/sozu-gateway-${TAG#v}.tgz" "oci://$REPO"

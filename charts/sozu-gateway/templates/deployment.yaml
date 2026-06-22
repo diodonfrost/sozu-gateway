@@ -23,14 +23,21 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       securityContext:
+        runAsNonRoot: true
         runAsUser: {{ .Values.runAsUser }}
         runAsGroup: {{ .Values.runAsUser }}
         fsGroup: {{ .Values.runAsUser }}
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         # --- data plane -------------------------------------------------------
         - name: sozu
           image: "{{ .Values.image.sozu.repository }}:{{ .Values.image.sozu.tag }}"
           imagePullPolicy: {{ .Values.image.sozu.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           args: ["start", "-c", "/etc/sozu/config.toml"]
           ports:
             - name: http
@@ -51,8 +58,13 @@ spec:
             {{- toYaml .Values.resources.sozu | nindent 12 }}
         # --- control plane ----------------------------------------------------
         - name: controller
-          image: "{{ .Values.image.controller.repository }}:{{ .Values.image.controller.tag }}"
+          image: "{{ .Values.image.controller.repository }}:{{ .Values.image.controller.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.controller.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           env:
             - name: SOZU_GW_CLASS
               value: {{ .Values.ingressClass.name | quote }}

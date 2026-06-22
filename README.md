@@ -65,10 +65,23 @@ make e2e                                  # uses ttl.sh
 IMAGE=ghcr.io/you/sozu-gw-controller:test make e2e
 ```
 
-Deploy manually instead:
+## Install (published artifacts)
+
+Releases publish the controller image and the Helm chart to **ghcr.io under the
+CleverCloud org** (image `ghcr.io/clevercloud/sozu-gateway`, chart
+`oci://ghcr.io/clevercloud/sozu-gateway`) — see
+[.github/workflows/release.yml](.github/workflows/release.yml). Install a tagged
+release straight from the OCI registry:
 
 ```bash
-helm upgrade --install sozu-gateway deploy/helm -n sozu-system --create-namespace \
+helm install sozu-gateway oci://ghcr.io/clevercloud/sozu-gateway \
+  --version <X.Y.Z> -n sozu-system --create-namespace
+```
+
+Or from a local checkout (e.g. to override the image during development):
+
+```bash
+helm upgrade --install sozu-gateway charts/sozu-gateway -n sozu-system --create-namespace \
   --set image.controller.repository=<your-repo> --set image.controller.tag=<tag>
 ```
 

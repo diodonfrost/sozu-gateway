@@ -27,7 +27,7 @@ docker build -q -t "$IMAGE" . >/dev/null
 docker push -q "$IMAGE" >/dev/null 2>&1 || docker push "$IMAGE"
 
 echo "==> helm install add-on"
-helm upgrade --install "$RELEASE" deploy/helm -n "$NS" --create-namespace \
+helm upgrade --install "$RELEASE" charts/sozu-gateway -n "$NS" --create-namespace \
   --set image.controller.repository="$REPO" \
   --set image.controller.tag="$TAG" \
   --set image.controller.pullPolicy=Always \

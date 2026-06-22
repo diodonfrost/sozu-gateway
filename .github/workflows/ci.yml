@@ -45,8 +45,9 @@ jobs:
       - uses: azure/setup-helm@v4
       - name: Helm lint + template
         run: |
-          helm lint deploy/helm
-          helm template sozu-gateway deploy/helm >/dev/null
+          helm lint charts/sozu-gateway
+          helm template sozu-gateway charts/sozu-gateway >/dev/null
+          helm template sozu-gateway charts/sozu-gateway --set rbac.allowStatusWrites=true >/dev/null
 
   docker:
     runs-on: ubuntu-latest
