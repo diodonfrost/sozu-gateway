@@ -1,0 +1,45 @@
+---
+source: crates/translator/tests/golden.rs
+expression: reqs
+---
+[
+  {
+    "request_type": {
+      "ADD_CERTIFICATE": {
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 443
+        },
+        "certificate": {
+          "certificate": "-----BEGIN CERTIFICATE-----\nMIIBpTCCAUugAwIBAgIUYoVQvvK8lpZSWVrg2DLe96psnScwCgYIKoZIzj0EAwIw\nGjEYMBYGA1UEAwwPYXBwLmV4YW1wbGUuY29tMB4XDTI2MDYyMjE0MDUwNVoXDTM2\nMDYxOTE0MDUwNVowGjEYMBYGA1UEAwwPYXBwLmV4YW1wbGUuY29tMFkwEwYHKoZI\nzj0CAQYIKoZIzj0DAQcDQgAEICnIHNZZPfTHQecO96e48PzTV/Uc6YyiTV74vTa+\nhiwTXDeWi/InwAzlk1ut1ymyRTzvmC/57Cr3ZWpr9ZOaRKNvMG0wHQYDVR0OBBYE\nFAYuHRKe2WyNpji0wiY/CqOk2yKjMB8GA1UdIwQYMBaAFAYuHRKe2WyNpji0wiY/\nCqOk2yKjMA8GA1UdEwEB/wQFMAMBAf8wGgYDVR0RBBMwEYIPYXBwLmV4YW1wbGUu\nY29tMAoGCCqGSM49BAMCA0gAMEUCICCpmw05Xg73J4USMrw+Ub+61tylmw2zqzEO\nB57+JBFWAiEAkrIKrurx3pBxaf+yqRa+q3IOwSvDQWRQDDf2L3i0RJ4=\n-----END CERTIFICATE-----\n",
+          "certificate_chain": [],
+          "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg1akB84f3ABCyMQio\nfSXOIeLoI3usXVE/ptWAETIC6s6hRANCAAQgKcgc1lk99MdB5w73p7jw/NNX9Rzp\njKJNXvi9Nr6GLBNcN5aL8ifADOWTW63XKbJFPO+YL/nsKvdlamv1k5pE\n-----END PRIVATE KEY-----\n",
+          "versions": [],
+          "names": [
+            "app.example.com"
+          ]
+        },
+        "expired_at": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_CERTIFICATE": {
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 443
+        },
+        "fingerprint": "2e6f2ec7b75dd33cd3e83b6d5a7d0954d74348d44c5a90f23133b13f65a0d15b"
+      }
+    }
+  }
+]

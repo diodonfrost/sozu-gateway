@@ -1,0 +1,22 @@
+---
+source: crates/translator/tests/golden.rs
+expression: reqs
+---
+[
+  {
+    "request_type": {
+      "REMOVE_BACKEND": {
+        "cluster_id": "app",
+        "backend_id": "app-10-0-0-2-8080",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 167772162
+            }
+          },
+          "port": 8080
+        }
+      }
+    }
+  }
+]

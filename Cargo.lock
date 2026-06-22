@@ -2359,8 +2359,10 @@ name = "sozu-gw-translator"
 version = "0.1.0"
 dependencies = [
  "insta",
+ "serde_json",
  "sozu-command-lib",
  "sozu-gw-ir",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

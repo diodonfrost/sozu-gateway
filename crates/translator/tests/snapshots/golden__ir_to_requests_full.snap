@@ -1,0 +1,229 @@
+---
+source: crates/translator/tests/golden.rs
+expression: "tr::ir_to_requests(&sample_ir())"
+---
+[
+  {
+    "request_type": {
+      "ADD_CLUSTER": {
+        "cluster_id": "api",
+        "sticky_session": true,
+        "https_redirect": false,
+        "proxy_protocol": null,
+        "load_balancing": 2,
+        "answer_503": null,
+        "load_metric": null,
+        "http2": null,
+        "answers": {},
+        "https_redirect_port": null,
+        "authorized_hashes": [],
+        "www_authenticate": null,
+        "max_connections_per_ip": null,
+        "retry_after": null,
+        "health_check": null,
+        "udp": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_CLUSTER": {
+        "cluster_id": "app",
+        "sticky_session": false,
+        "https_redirect": false,
+        "proxy_protocol": null,
+        "load_balancing": 0,
+        "answer_503": null,
+        "load_metric": null,
+        "http2": null,
+        "answers": {},
+        "https_redirect_port": null,
+        "authorized_hashes": [],
+        "www_authenticate": null,
+        "max_connections_per_ip": null,
+        "retry_after": null,
+        "health_check": null,
+        "udp": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_BACKEND": {
+        "cluster_id": "api",
+        "backend_id": "api-10-0-1-1-9090",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 167772417
+            }
+          },
+          "port": 9090
+        },
+        "sticky_id": null,
+        "load_balancing_parameters": {
+          "weight": 5
+        },
+        "backup": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_BACKEND": {
+        "cluster_id": "app",
+        "backend_id": "app-10-0-0-1-8080",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 167772161
+            }
+          },
+          "port": 8080
+        },
+        "sticky_id": null,
+        "load_balancing_parameters": null,
+        "backup": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_BACKEND": {
+        "cluster_id": "app",
+        "backend_id": "app-10-0-0-2-8080",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 167772162
+            }
+          },
+          "port": 8080
+        },
+        "sticky_id": null,
+        "load_balancing_parameters": null,
+        "backup": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_CERTIFICATE": {
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 443
+        },
+        "certificate": {
+          "certificate": "-----BEGIN CERTIFICATE-----\nMIIBpTCCAUugAwIBAgIUblpeGr9XPTD3zeWWYEbu7sgjXmcwCgYIKoZIzj0EAwIw\nGjEYMBYGA1UEAwwPYXBwLmV4YW1wbGUuY29tMB4XDTI2MDYyMjE0MDUwNVoXDTM2\nMDYxOTE0MDUwNVowGjEYMBYGA1UEAwwPYXBwLmV4YW1wbGUuY29tMFkwEwYHKoZI\nzj0CAQYIKoZIzj0DAQcDQgAEBaLuu0lVhUXnh/SamgpEpAGfxr27/9FWrR0p9stl\nnSZemaqqSkQEok1z+P0eZQr/x7iomhVmPmt6+ZVFs1EkoaNvMG0wHQYDVR0OBBYE\nFP3kqoLsEYsh7+Vd4ri4jzL3ed2bMB8GA1UdIwQYMBaAFP3kqoLsEYsh7+Vd4ri4\njzL3ed2bMA8GA1UdEwEB/wQFMAMBAf8wGgYDVR0RBBMwEYIPYXBwLmV4YW1wbGUu\nY29tMAoGCCqGSM49BAMCA0gAMEUCIQDIFfl1wLYPICltOZ8OWVWsjmH2h0zOiXYU\naPKjr9jyPwIgXp854lfa4ccn6OAmdanaiutMxYV8CuWsGKycTOy2K6s=\n-----END CERTIFICATE-----\n",
+          "certificate_chain": [],
+          "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg02uAvP3KOMuLqXiP\nxZGEZUK0+ggXy1aAIBM2L366tsmhRANCAAQFou67SVWFReeH9JqaCkSkAZ/Gvbv/\n0VatHSn2y2WdJl6ZqqpKRASiTXP4/R5lCv/HuKiaFWY+a3r5lUWzUSSh\n-----END PRIVATE KEY-----\n",
+          "versions": [],
+          "names": [
+            "app.example.com"
+          ]
+        },
+        "expired_at": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_HTTPS_FRONTEND": {
+        "cluster_id": "app",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 443
+        },
+        "hostname": "app.example.com",
+        "path": {
+          "kind": 0,
+          "value": "/"
+        },
+        "method": null,
+        "position": 2,
+        "tags": {},
+        "redirect": null,
+        "required_auth": null,
+        "redirect_scheme": null,
+        "redirect_template": null,
+        "rewrite_host": null,
+        "rewrite_path": null,
+        "rewrite_port": null,
+        "headers": [],
+        "hsts": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_HTTP_FRONTEND": {
+        "cluster_id": "api",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 80
+        },
+        "hostname": "api.example.com",
+        "path": {
+          "kind": 2,
+          "value": "/v1"
+        },
+        "method": null,
+        "position": 2,
+        "tags": {},
+        "redirect": null,
+        "required_auth": null,
+        "redirect_scheme": null,
+        "redirect_template": null,
+        "rewrite_host": null,
+        "rewrite_path": null,
+        "rewrite_port": null,
+        "headers": [],
+        "hsts": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_HTTP_FRONTEND": {
+        "cluster_id": "app",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 80
+        },
+        "hostname": "app.example.com",
+        "path": {
+          "kind": 0,
+          "value": "/"
+        },
+        "method": null,
+        "position": 2,
+        "tags": {},
+        "redirect": null,
+        "required_auth": null,
+        "redirect_scheme": null,
+        "redirect_template": null,
+        "rewrite_host": null,
+        "rewrite_path": null,
+        "rewrite_port": null,
+        "headers": [],
+        "hsts": null
+      }
+    }
+  }
+]

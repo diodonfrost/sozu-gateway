@@ -11,6 +11,11 @@ publish.workspace = true
 [dependencies]
 sozu-gw-ir = { workspace = true }
 sozu-command-lib = { workspace = true }
+thiserror = { workspace = true }
+# Used for stable secondary-ordering keys when canonicalising request batches.
+serde_json = { workspace = true }
 
 [dev-dependencies]
 insta = { version = "1", features = ["json", "redactions"] }
+serde_json = { workspace = true }
+sozu-command-lib = { workspace = true }

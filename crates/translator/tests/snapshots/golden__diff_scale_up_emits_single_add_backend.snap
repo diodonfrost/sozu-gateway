@@ -1,0 +1,25 @@
+---
+source: crates/translator/tests/golden.rs
+expression: reqs
+---
+[
+  {
+    "request_type": {
+      "ADD_BACKEND": {
+        "cluster_id": "app",
+        "backend_id": "app-10-0-0-3-8080",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 167772163
+            }
+          },
+          "port": 8080
+        },
+        "sticky_id": null,
+        "load_balancing_parameters": null,
+        "backup": null
+      }
+    }
+  }
+]
