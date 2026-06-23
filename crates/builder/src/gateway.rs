@@ -308,79 +308,86 @@ fn attach_rule(
     resolved_refs: &mut bool,
 ) {
     // backendRefs: exactly one Service backend (Sōzu cannot weight-split).
-    let refs: Vec<_> = rule.backend_refs.iter().flatten().collect();
-    if refs.is_empty() {
-        problems.push(Problem::NoReadyEndpoints {
-            service: "<none>".to_string(),
-        });
-        *resolved_refs = false;
-        return;
-    }
-    if refs.len() > 1 {
-        problems.push(Problem::WeightedBackendsUnsupported);
-        *resolved_refs = false;
-        return;
-    }
-    let br = refs[0];
-    let is_service = br.group.as_deref().unwrap_or("").is_empty()
-        && br.kind.as_deref().unwrap_or("Service") == "Service";
-    if !is_service {
-        problems.push(Problem::NonServiceBackend);
-        *resolved_refs = false;
-        return;
-    }
-    let backend_ns = br.namespace.clone().unwrap_or_else(|| route_ns.to_string());
-    if backend_ns != route_ns
-        && !reference_granted(
-            inputs,
-            &backend_ns,
-            "Service",
-            &br.name,
-            route_ns,
-            "HTTPRoute",
-        )
-    {
-        problems.push(Problem::BackendRefNotPermitted {
-            reference: format!("Service {backend_ns}/{}", br.name),
-        });
-        *resolved_refs = false;
-        return;
-    }
-    let Some(port) = br.port else {
-        problems.push(Problem::ServicePortNotFound {
-            service: br.name.clone(),
-            port: "<unspecified>".to_string(),
-        });
-        *resolved_refs = false;
-        return;
-    };
-
-    let cluster_id = match add_service_route(
-        index,
-        clusters,
-        backends,
-        &backend_ns,
-        &br.name,
-        &PortRef::Number(port),
-    ) {
-        Err(problem) => {
-            problems.push(problem);
-            *resolved_refs = false;
-            return;
-        }
-        Ok((cluster_id, has_endpoints)) => {
-            if !has_endpoints {
-                problems.push(Problem::NoReadyEndpoints {
-                    service: br.name.clone(),
-                });
-            }
-            cluster_id
-        }
-    };
-
     // Parse the route filters into IR filters (Phase 3). Unsupported filters /
     // sub-fields are reported and skipped, never silently mis-applied.
     let filters = parse_filters(rule.filters.as_deref().unwrap_or(&[]), problems);
+
+    // Resolve the backend. A redirect-only rule has no backendRefs (the Gateway
+    // API even forbids combining RequestRedirect with backendRefs), so it yields
+    // a frontend with no cluster; otherwise exactly one Service backendRef is
+    // required (Sōzu cannot weight-split across clusters).
+    let refs: Vec<_> = rule.backend_refs.iter().flatten().collect();
+    let cluster_id: Option<String> = if refs.is_empty() {
+        if filters.redirect.is_some() {
+            None
+        } else {
+            problems.push(Problem::NoReadyEndpoints {
+                service: "<none>".to_string(),
+            });
+            *resolved_refs = false;
+            return;
+        }
+    } else if refs.len() > 1 {
+        problems.push(Problem::WeightedBackendsUnsupported);
+        *resolved_refs = false;
+        return;
+    } else {
+        let br = refs[0];
+        let is_service = br.group.as_deref().unwrap_or("").is_empty()
+            && br.kind.as_deref().unwrap_or("Service") == "Service";
+        if !is_service {
+            problems.push(Problem::NonServiceBackend);
+            *resolved_refs = false;
+            return;
+        }
+        let backend_ns = br.namespace.clone().unwrap_or_else(|| route_ns.to_string());
+        if backend_ns != route_ns
+            && !reference_granted(
+                inputs,
+                &backend_ns,
+                "Service",
+                &br.name,
+                route_ns,
+                "HTTPRoute",
+            )
+        {
+            problems.push(Problem::BackendRefNotPermitted {
+                reference: format!("Service {backend_ns}/{}", br.name),
+            });
+            *resolved_refs = false;
+            return;
+        }
+        let Some(port) = br.port else {
+            problems.push(Problem::ServicePortNotFound {
+                service: br.name.clone(),
+                port: "<unspecified>".to_string(),
+            });
+            *resolved_refs = false;
+            return;
+        };
+        match add_service_route(
+            index,
+            clusters,
+            backends,
+            &backend_ns,
+            &br.name,
+            &PortRef::Number(port),
+        ) {
+            Err(problem) => {
+                problems.push(problem);
+                *resolved_refs = false;
+                return;
+            }
+            Ok((cid, has_endpoints)) => {
+                if !has_endpoints {
+                    problems.push(Problem::NoReadyEndpoints {
+                        service: br.name.clone(),
+                    });
+                }
+                Some(cid)
+            }
+        }
+    };
 
     // Reduce the rule's matches to (path, method) pairs. No `matches` means
     // "match everything" → prefix "/". Header/query matches are skipped.

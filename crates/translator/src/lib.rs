@@ -92,7 +92,7 @@ fn backend_request(b: &ir::Backend) -> Request {
 
 fn frontend_request(f: &ir::Frontend) -> Request {
     let mut payload = RequestHttpFrontend {
-        cluster_id: Some(f.cluster_id.clone()),
+        cluster_id: f.cluster_id.clone(),
         address: f.listener.into(),
         hostname: f.hostname.clone(),
         path: path_rule(&f.path),

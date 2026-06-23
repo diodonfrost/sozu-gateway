@@ -42,7 +42,7 @@ fn frontend(host: &str, path: ir::PathMatch, cluster_id: &str, tls: bool) -> ir:
         hostname: host.to_string(),
         path,
         method: None,
-        cluster_id: cluster_id.to_string(),
+        cluster_id: Some(cluster_id.to_string()),
         tls,
         listener: addr(if tls { "0.0.0.0:443" } else { "0.0.0.0:80" }),
         filters: ir::FrontendFilters::default(),

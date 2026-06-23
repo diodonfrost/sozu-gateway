@@ -61,7 +61,8 @@ pub struct Frontend {
     pub hostname: String,
     pub path: PathMatch,
     pub method: Option<String>,
-    pub cluster_id: String,
+    /// Target cluster, or `None` for a redirect-only frontend (no backend).
+    pub cluster_id: Option<String>,
     /// `true` => HTTPS listener (`AddHttpsFrontend`), `false` => HTTP.
     pub tls: bool,
     /// The listener address this frontend attaches to (e.g. `0.0.0.0:80`).

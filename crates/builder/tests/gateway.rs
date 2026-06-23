@@ -264,8 +264,7 @@ fn redirect_filter_supported_and_unsupported_reported() {
                 "filters": [
                     { "type": "RequestRedirect", "requestRedirect": { "scheme": "https", "statusCode": 301 } },
                     { "type": "RequestMirror", "requestMirror": { "backendRef": { "name": "mirror", "port": 80 } } }
-                ],
-                "backendRefs": [{ "name": "web", "port": 80 }]
+                ]
             }]
         }
     }));
@@ -279,6 +278,9 @@ fn redirect_filter_supported_and_unsupported_reported() {
     };
     let out = build(&BuildConfig::default(), &inputs);
 
+    // Redirect-only route: a frontend with no cluster (backendRef-less).
+    assert_eq!(out.ir.frontends.len(), 1);
+    assert!(out.ir.frontends[0].cluster_id.is_none());
     let redirect = out.ir.frontends[0]
         .filters
         .redirect
