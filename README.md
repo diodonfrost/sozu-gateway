@@ -35,6 +35,54 @@ Each release publishes the controller image and the Helm chart to ghcr.io.
 
 The Gateway API (`Gateway`/`HTTPRoute`) and Ingress status reporting are planned for Phase 2.
 
+## Features
+
+Legend: ✅ supported · 🟡 planned · ❌ not supported.
+
+| Area | Feature | Status | Notes |
+| ---- | ------- | :----: | ----- |
+| Ingress | IngressClass selection (`spec.ingressClassName`) | ✅ | |
+| Ingress | Legacy `kubernetes.io/ingress.class` annotation | ✅ | |
+| Ingress | Default IngressClass (`is-default-class`) | ✅ | reconciles class-less Ingresses |
+| Ingress | Host match — exact | ✅ | |
+| Ingress | Host match — wildcard (`*.example.com`) | ✅ | one extra label |
+| Ingress | `pathType: Prefix` | ✅ | |
+| Ingress | `pathType: Exact` | ✅ | |
+| Ingress | `pathType: ImplementationSpecific` | ✅ | mapped to a Sōzu regex (2.x anchors regexes) |
+| Ingress | Multiple Ingresses / hosts / paths | ✅ | de-duplicated by route key |
+| Ingress | Rule without a host (catch-all) | ❌ | skipped with a reported problem |
+| Ingress | `spec.defaultBackend` | ❌ | not implemented |
+| Ingress | `backend.resource` (non-Service backend) | ❌ | only Service backends |
+| TLS | Termination from a `Secret` (`tls.crt`/`tls.key`) | ✅ | works with cert-manager-issued Secrets |
+| TLS | SNI host selection | ✅ | handled by Sōzu |
+| TLS | Wildcard certificate | ✅ | |
+| TLS | Zero-gap certificate rotation | ✅ | `ReplaceCertificate` |
+| TLS | HTTP → HTTPS redirect | 🟡 | Sōzu supports it; not wired yet |
+| Routing | Backends = pod IPs from EndpointSlice | ✅ | never the Service ClusterIP |
+| Routing | Multi-port Service (match by port name) | ✅ | |
+| Routing | Ready-endpoint filtering | ✅ | excludes not-ready endpoints |
+| Routing | Hot reload — no proxy restart | ✅ | see [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md) |
+| Routing | Idempotent reconcile + periodic resync | ✅ | |
+| Routing | Load-balancing algorithm selection | 🟡 | fixed round-robin today |
+| Routing | Sticky sessions | 🟡 | Sōzu supports it; not exposed |
+| Routing | Per-endpoint weights | 🟡 | IR supports it; equal weights today |
+| API gateway | Request/response header edits | 🟡 | Sōzu filter; Phase 3 |
+| API gateway | Path / host rewrite | 🟡 | Sōzu filter; Phase 3 |
+| API gateway | Redirects | 🟡 | Sōzu filter; Phase 3 |
+| API gateway | HTTP Basic auth | 🟡 | Sōzu filter; Phase 3 |
+| API gateway | Rate limiting (per source IP) | 🟡 | Sōzu filter; Phase 3 |
+| API gateway | Match on header value / query param | ❌ | not supported by Sōzu |
+| API gateway | Weighted split across multiple Services | ❌ | not supported by Sōzu |
+| API gateway | Request mirroring / shadowing | ❌ | not supported by Sōzu |
+| Gateway API | `GatewayClass` / `Gateway` / `HTTPRoute` | 🟡 | Phase 2 |
+| Gateway API | `ReferenceGrant`, status conditions | 🟡 | Phase 2 |
+| Protocols | HTTP / HTTPS (L7) | ✅ | |
+| Protocols | TCP / UDP ingress (L4) | ❌ | Sōzu supports it; not wired |
+| Operations | Exposure via `Service type=LoadBalancer` | ✅ | |
+| Operations | Structured logs (`tracing`) | ✅ | |
+| Operations | Ingress `status` write-back (conditions) | 🟡 | Phase 2 (`rbac.allowStatusWrites`) |
+| Operations | Dedicated `/healthz` readiness gate | ❌ | not yet (see e2e caveats) |
+
 ## Install
 
 To deploy the gateway you need a running Kubernetes cluster, the `kubectl` command with
