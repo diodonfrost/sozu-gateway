@@ -27,3 +27,4 @@ serde_json = { workspace = true }
 # Integration tests construct k8s objects, so the type crates must be dev-deps too.
 k8s-openapi = { version = "0.28", features = ["v1_36"] }
 sozu-gw-gateway-api = { workspace = true }
+sozu-gw-ir = { workspace = true }

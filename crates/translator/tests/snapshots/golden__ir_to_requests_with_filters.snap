@@ -1,0 +1,90 @@
+---
+source: crates/translator/tests/golden.rs
+expression: "tr::ir_to_requests(&model)"
+---
+[
+  {
+    "request_type": {
+      "ADD_CLUSTER": {
+        "cluster_id": "app",
+        "sticky_session": false,
+        "https_redirect": false,
+        "proxy_protocol": null,
+        "load_balancing": 0,
+        "answer_503": null,
+        "load_metric": null,
+        "http2": null,
+        "answers": {},
+        "https_redirect_port": null,
+        "authorized_hashes": [],
+        "www_authenticate": null,
+        "max_connections_per_ip": null,
+        "retry_after": null,
+        "health_check": null,
+        "udp": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_BACKEND": {
+        "cluster_id": "app",
+        "backend_id": "app-10-0-0-1-8080",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 167772161
+            }
+          },
+          "port": 8080
+        },
+        "sticky_id": null,
+        "load_balancing_parameters": null,
+        "backup": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_HTTP_FRONTEND": {
+        "cluster_id": "app",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 80
+        },
+        "hostname": "app.example.com",
+        "path": {
+          "kind": 0,
+          "value": "/"
+        },
+        "method": null,
+        "position": 2,
+        "tags": {},
+        "redirect": 1,
+        "required_auth": null,
+        "redirect_scheme": 2,
+        "redirect_template": null,
+        "rewrite_host": "backend.svc",
+        "rewrite_path": "/v2",
+        "rewrite_port": null,
+        "headers": [
+          {
+            "position": 1,
+            "key": "X-Env",
+            "val": "prod"
+          },
+          {
+            "position": 2,
+            "key": "Server",
+            "val": ""
+          }
+        ],
+        "hsts": null
+      }
+    }
+  }
+]

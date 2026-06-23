@@ -66,6 +66,62 @@ pub struct Frontend {
     pub tls: bool,
     /// The listener address this frontend attaches to (e.g. `0.0.0.0:80`).
     pub listener: SocketAddr,
+    /// Per-route filters (Phase 3): header edits, redirect, rewrite.
+    #[serde(default)]
+    pub filters: FrontendFilters,
+}
+
+/// Request/response transformations applied to a frontend (Phase 3). Maps onto
+/// Sōzu's per-frontend filter fields. Empty by default.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FrontendFilters {
+    pub header_mods: Vec<HeaderMod>,
+    pub redirect: Option<Redirect>,
+    pub rewrite: Option<Rewrite>,
+}
+
+/// Set/overwrite (`value: Some`) or delete (`value: None`) a header on the
+/// request or the response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeaderMod {
+    pub on: HeaderTarget,
+    pub key: String,
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HeaderTarget {
+    Request,
+    Response,
+}
+
+/// A scheme/status redirect. Host/path/port redirect targets are not modelled
+/// yet (the builder reports them as unsupported).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Redirect {
+    pub scheme: Option<Scheme>,
+    pub status: RedirectStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Scheme {
+    Http,
+    Https,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RedirectStatus {
+    /// HTTP 301
+    MovedPermanently,
+    /// HTTP 302
+    Found,
+}
+
+/// Rewrite the request's host and/or full path before proxying.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Rewrite {
+    pub hostname: Option<String>,
+    pub path: Option<String>,
 }
 
 /// A TLS certificate loaded onto the HTTPS listener (from a K8s TLS Secret).

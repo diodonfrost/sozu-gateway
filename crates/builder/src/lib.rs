@@ -454,6 +454,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                             cluster_id: cluster_id.clone(),
                             tls: false,
                             listener: cfg.http_listener,
+                            filters: ir::FrontendFilters::default(),
                         });
                         if tls_covers(&tls_ready_hosts, host) {
                             frontends.push(ir::Frontend {
@@ -463,6 +464,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                                 cluster_id,
                                 tls: true,
                                 listener: cfg.https_listener,
+                                filters: ir::FrontendFilters::default(),
                             });
                         }
                     }

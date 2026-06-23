@@ -21,7 +21,12 @@ expression: out
         "method": null,
         "cluster_id": "demo.web.80",
         "tls": false,
-        "listener": "0.0.0.0:80"
+        "listener": "0.0.0.0:80",
+        "filters": {
+          "header_mods": [],
+          "redirect": null,
+          "rewrite": null
+        }
       },
       {
         "hostname": "app.example.com",
@@ -31,7 +36,12 @@ expression: out
         "method": null,
         "cluster_id": "demo.web.80",
         "tls": true,
-        "listener": "0.0.0.0:443"
+        "listener": "0.0.0.0:443",
+        "filters": {
+          "header_mods": [],
+          "redirect": null,
+          "rewrite": null
+        }
       }
     ],
     "backends": [

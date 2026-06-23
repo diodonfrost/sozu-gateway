@@ -45,6 +45,7 @@ fn frontend(host: &str, path: ir::PathMatch, cluster_id: &str, tls: bool) -> ir:
         cluster_id: cluster_id.to_string(),
         tls,
         listener: addr(if tls { "0.0.0.0:443" } else { "0.0.0.0:80" }),
+        filters: ir::FrontendFilters::default(),
     }
 }
 
@@ -292,6 +293,45 @@ fn reconcile_retarget_https_route_removes_before_adds() {
         "old HTTPS frontend must be removed before the new one is added, \
          got remove at {remove_idx}, add at {add_idx}: {reqs:#?}"
     );
+}
+
+#[test]
+fn ir_to_requests_with_filters() {
+    let mut f = frontend(
+        "app.example.com",
+        ir::PathMatch::Prefix("/".into()),
+        "app",
+        false,
+    );
+    f.filters = ir::FrontendFilters {
+        header_mods: vec![
+            ir::HeaderMod {
+                on: ir::HeaderTarget::Request,
+                key: "X-Env".into(),
+                value: Some("prod".into()),
+            },
+            ir::HeaderMod {
+                on: ir::HeaderTarget::Response,
+                key: "Server".into(),
+                value: None, // delete
+            },
+        ],
+        redirect: Some(ir::Redirect {
+            scheme: Some(ir::Scheme::Https),
+            status: ir::RedirectStatus::MovedPermanently,
+        }),
+        rewrite: Some(ir::Rewrite {
+            hostname: Some("backend.svc".into()),
+            path: Some("/v2".into()),
+        }),
+    };
+    let model = ir::Ir {
+        clusters: vec![cluster("app", ir::LbAlgorithm::RoundRobin, false)],
+        backends: vec![backend("app", "10.0.0.1:8080", None)],
+        frontends: vec![f],
+        certificates: vec![],
+    };
+    insta::assert_json_snapshot!(tr::ir_to_requests(&model));
 }
 
 #[test]

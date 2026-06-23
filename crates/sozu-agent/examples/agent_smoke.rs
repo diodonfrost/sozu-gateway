@@ -57,6 +57,7 @@ async fn main() -> Result<()> {
                 cluster_id: cluster_id.clone(),
                 tls: false,
                 listener: listen_http,
+                filters: ir::FrontendFilters::default(),
             },
             ir::Frontend {
                 hostname: host.clone(),
@@ -65,6 +66,7 @@ async fn main() -> Result<()> {
                 cluster_id: cluster_id.clone(),
                 tls: true,
                 listener: listen_https,
+                filters: ir::FrontendFilters::default(),
             },
         ],
         certificates: vec![ir::Certificate {

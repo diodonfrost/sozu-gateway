@@ -11,6 +11,7 @@ use serde_json::json;
 
 use sozu_gw_builder::{build, BuildConfig, Inputs, Problem};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute};
+use sozu_gw_ir as ir;
 
 const CERT_A: &str = include_str!("fixtures/cert_a.pem");
 const KEY_A: &str = include_str!("fixtures/key_a.pem");
@@ -191,6 +192,108 @@ fn weighted_backends_are_unsupported() {
     assert!(parent
         .problems
         .contains(&Problem::WeightedBackendsUnsupported));
+}
+
+#[test]
+fn http_route_filters_map_to_ir() {
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{
+                "matches": [{ "path": { "type": "PathPrefix", "value": "/" } }],
+                "filters": [
+                    { "type": "RequestHeaderModifier", "requestHeaderModifier": {
+                        "set": [{ "name": "X-Env", "value": "prod" }],
+                        "remove": ["X-Debug"] } },
+                    { "type": "ResponseHeaderModifier", "responseHeaderModifier": {
+                        "add": [{ "name": "X-Served-By", "value": "sozu" }] } },
+                    { "type": "URLRewrite", "urlRewrite": {
+                        "hostname": "backend.svc",
+                        "path": { "type": "ReplaceFullPath", "replaceFullPath": "/v2" } } }
+                ],
+                "backendRefs": [{ "name": "web", "port": 80 }]
+            }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![http_gateway()],
+        http_routes: vec![route],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1);
+    let f = &out.ir.frontends[0].filters;
+    assert_eq!(f.header_mods.len(), 3);
+    assert!(f
+        .header_mods
+        .iter()
+        .any(|m| matches!(m.on, ir::HeaderTarget::Request)
+            && m.key == "X-Env"
+            && m.value.as_deref() == Some("prod")));
+    assert!(f
+        .header_mods
+        .iter()
+        .any(|m| matches!(m.on, ir::HeaderTarget::Request)
+            && m.key == "X-Debug"
+            && m.value.is_none())); // remove
+    assert!(f
+        .header_mods
+        .iter()
+        .any(|m| matches!(m.on, ir::HeaderTarget::Response) && m.key == "X-Served-By"));
+    let rw = f.rewrite.as_ref().expect("rewrite");
+    assert_eq!(rw.hostname.as_deref(), Some("backend.svc"));
+    assert_eq!(rw.path.as_deref(), Some("/v2"));
+    assert!(out.routes[0].parents[0].resolved_refs);
+    assert!(out.routes[0].parents[0].problems.is_empty());
+}
+
+#[test]
+fn redirect_filter_supported_and_unsupported_reported() {
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{
+                "filters": [
+                    { "type": "RequestRedirect", "requestRedirect": { "scheme": "https", "statusCode": 301 } },
+                    { "type": "RequestMirror", "requestMirror": { "backendRef": { "name": "mirror", "port": 80 } } }
+                ],
+                "backendRefs": [{ "name": "web", "port": 80 }]
+            }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![http_gateway()],
+        http_routes: vec![route],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    let redirect = out.ir.frontends[0]
+        .filters
+        .redirect
+        .as_ref()
+        .expect("redirect");
+    assert!(matches!(redirect.scheme, Some(ir::Scheme::Https)));
+    assert!(matches!(
+        redirect.status,
+        ir::RedirectStatus::MovedPermanently
+    ));
+    // RequestMirror is not supported by Sōzu -> reported.
+    assert!(out.routes[0].parents[0]
+        .problems
+        .iter()
+        .any(|p| matches!(p, Problem::FilterUnsupported { .. })));
 }
 
 #[test]

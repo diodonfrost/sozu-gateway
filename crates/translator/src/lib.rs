@@ -23,9 +23,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 
 use sozu_command_lib::proto::command::{
-    request::RequestType, AddBackend, AddCertificate, CertificateAndKey, Cluster,
-    LoadBalancingAlgorithms, LoadBalancingParams, PathRule, PathRuleKind, RemoveCertificate,
-    ReplaceCertificate, Request, RequestHttpFrontend, RulePosition,
+    request::RequestType, AddBackend, AddCertificate, CertificateAndKey, Cluster, Header,
+    HeaderPosition, LoadBalancingAlgorithms, LoadBalancingParams, PathRule, PathRuleKind,
+    RedirectPolicy, RedirectScheme, RemoveCertificate, ReplaceCertificate, Request,
+    RequestHttpFrontend, RulePosition,
 };
 use sozu_command_lib::state::ConfigState;
 use sozu_gw_ir as ir;
@@ -90,7 +91,7 @@ fn backend_request(b: &ir::Backend) -> Request {
 }
 
 fn frontend_request(f: &ir::Frontend) -> Request {
-    let payload = RequestHttpFrontend {
+    let mut payload = RequestHttpFrontend {
         cluster_id: Some(f.cluster_id.clone()),
         address: f.listener.into(),
         hostname: f.hostname.clone(),
@@ -99,10 +100,46 @@ fn frontend_request(f: &ir::Frontend) -> Request {
         position: RulePosition::Tree as i32,
         ..Default::default()
     };
+    apply_filters(&mut payload, &f.filters);
     if f.tls {
         RequestType::AddHttpsFrontend(payload).into()
     } else {
         RequestType::AddHttpFrontend(payload).into()
+    }
+}
+
+/// Map the IR's per-route filters onto Sōzu's frontend fields.
+fn apply_filters(payload: &mut RequestHttpFrontend, filters: &ir::FrontendFilters) {
+    payload.headers = filters
+        .header_mods
+        .iter()
+        .map(|m| Header {
+            position: match m.on {
+                ir::HeaderTarget::Request => HeaderPosition::Request,
+                ir::HeaderTarget::Response => HeaderPosition::Response,
+            } as i32,
+            key: m.key.clone(),
+            // Empty value deletes the header by name (Sōzu semantics).
+            val: m.value.clone().unwrap_or_default(),
+        })
+        .collect();
+
+    if let Some(redirect) = &filters.redirect {
+        payload.redirect = Some(match redirect.status {
+            ir::RedirectStatus::MovedPermanently => RedirectPolicy::Permanent,
+            ir::RedirectStatus::Found => RedirectPolicy::Found,
+        } as i32);
+        if let Some(scheme) = redirect.scheme {
+            payload.redirect_scheme = Some(match scheme {
+                ir::Scheme::Http => RedirectScheme::UseHttp,
+                ir::Scheme::Https => RedirectScheme::UseHttps,
+            } as i32);
+        }
+    }
+
+    if let Some(rewrite) = &filters.rewrite {
+        payload.rewrite_host = rewrite.hostname.clone();
+        payload.rewrite_path = rewrite.path.clone();
     }
 }
 

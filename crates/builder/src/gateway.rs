@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use sozu_gw_gateway_api::gateway::GatewayListenersTlsMode;
 use sozu_gw_gateway_api::httproute::{
+    HttpRouteRulesFilters, HttpRouteRulesFiltersRequestRedirectScheme, HttpRouteRulesFiltersType,
     HttpRouteRulesMatchesMethod, HttpRouteRulesMatchesPath, HttpRouteRulesMatchesPathType,
 };
 use sozu_gw_ir as ir;
@@ -377,12 +378,9 @@ fn attach_rule(
         }
     };
 
-    // Route filters are a Phase-3 feature; flag and ignore them.
-    if rule.filters.as_ref().is_some_and(|f| !f.is_empty()) {
-        problems.push(Problem::FilterUnsupported {
-            kind: "httproute rule filter".to_string(),
-        });
-    }
+    // Parse the route filters into IR filters (Phase 3). Unsupported filters /
+    // sub-fields are reported and skipped, never silently mis-applied.
+    let filters = parse_filters(rule.filters.as_deref().unwrap_or(&[]), problems);
 
     // Reduce the rule's matches to (path, method) pairs. No `matches` means
     // "match everything" → prefix "/". Header/query matches are skipped.
@@ -422,6 +420,7 @@ fn attach_rule(
                     method: method.clone(),
                     cluster_id: cluster_id.clone(),
                     tls: l.https,
+                    filters: filters.clone(),
                     listener: if l.https {
                         cfg.https_listener
                     } else {
@@ -448,6 +447,113 @@ fn path_match(path: Option<&HttpRouteRulesMatchesPath>) -> ir::PathMatch {
         // PathPrefix (the default) or unset.
         _ => ir::PathMatch::Prefix(value),
     }
+}
+
+/// Parse HTTPRoute filters into neutral IR filters. Supported: header modifiers
+/// (set/add→set, remove→delete), RequestRedirect (scheme + status), URLRewrite
+/// (hostname + replaceFullPath). Unsupported filters/sub-fields are reported.
+fn parse_filters(
+    filters: &[HttpRouteRulesFilters],
+    problems: &mut Vec<Problem>,
+) -> ir::FrontendFilters {
+    let mut ff = ir::FrontendFilters::default();
+    for filter in filters {
+        match &filter.r#type {
+            HttpRouteRulesFiltersType::RequestHeaderModifier => {
+                if let Some(m) = &filter.request_header_modifier {
+                    for s in m.set.iter().flatten() {
+                        ff.header_mods.push(ir::HeaderMod {
+                            on: ir::HeaderTarget::Request,
+                            key: s.name.clone(),
+                            value: Some(s.value.clone()),
+                        });
+                    }
+                    // Sōzu has no header "append" — `add` is applied as set.
+                    for a in m.add.iter().flatten() {
+                        ff.header_mods.push(ir::HeaderMod {
+                            on: ir::HeaderTarget::Request,
+                            key: a.name.clone(),
+                            value: Some(a.value.clone()),
+                        });
+                    }
+                    for r in m.remove.iter().flatten() {
+                        ff.header_mods.push(ir::HeaderMod {
+                            on: ir::HeaderTarget::Request,
+                            key: r.clone(),
+                            value: None,
+                        });
+                    }
+                }
+            }
+            HttpRouteRulesFiltersType::ResponseHeaderModifier => {
+                if let Some(m) = &filter.response_header_modifier {
+                    for s in m.set.iter().flatten() {
+                        ff.header_mods.push(ir::HeaderMod {
+                            on: ir::HeaderTarget::Response,
+                            key: s.name.clone(),
+                            value: Some(s.value.clone()),
+                        });
+                    }
+                    for a in m.add.iter().flatten() {
+                        ff.header_mods.push(ir::HeaderMod {
+                            on: ir::HeaderTarget::Response,
+                            key: a.name.clone(),
+                            value: Some(a.value.clone()),
+                        });
+                    }
+                    for r in m.remove.iter().flatten() {
+                        ff.header_mods.push(ir::HeaderMod {
+                            on: ir::HeaderTarget::Response,
+                            key: r.clone(),
+                            value: None,
+                        });
+                    }
+                }
+            }
+            HttpRouteRulesFiltersType::RequestRedirect => {
+                if let Some(r) = &filter.request_redirect {
+                    let scheme = r.scheme.as_ref().map(|s| match s {
+                        HttpRouteRulesFiltersRequestRedirectScheme::Http => ir::Scheme::Http,
+                        HttpRouteRulesFiltersRequestRedirectScheme::Https => ir::Scheme::Https,
+                    });
+                    let status = match r.status_code {
+                        Some(301) => ir::RedirectStatus::MovedPermanently,
+                        _ => ir::RedirectStatus::Found, // 302 is the Gateway default
+                    };
+                    if r.hostname.is_some() || r.path.is_some() || r.port.is_some() {
+                        problems.push(Problem::FilterUnsupported {
+                            kind: "RequestRedirect hostname/path/port".to_string(),
+                        });
+                    }
+                    ff.redirect = Some(ir::Redirect { scheme, status });
+                }
+            }
+            HttpRouteRulesFiltersType::UrlRewrite => {
+                if let Some(rw) = &filter.url_rewrite {
+                    let mut path = None;
+                    if let Some(p) = &rw.path {
+                        if let Some(full) = &p.replace_full_path {
+                            path = Some(full.clone());
+                        } else {
+                            problems.push(Problem::FilterUnsupported {
+                                kind: "URLRewrite replacePrefixMatch".to_string(),
+                            });
+                        }
+                    }
+                    ff.rewrite = Some(ir::Rewrite {
+                        hostname: rw.hostname.clone(),
+                        path,
+                    });
+                }
+            }
+            HttpRouteRulesFiltersType::RequestMirror | HttpRouteRulesFiltersType::ExtensionRef => {
+                problems.push(Problem::FilterUnsupported {
+                    kind: format!("{:?}", filter.r#type),
+                });
+            }
+        }
+    }
+    ff
 }
 
 /// The wire spelling of an HTTP method (`GET`, `POST`, …) via its serde rename.
