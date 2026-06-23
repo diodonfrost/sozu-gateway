@@ -13,6 +13,7 @@ members = [
     "crates/builder",
     "crates/sozu-agent",
     "crates/controller",
+    "crates/gateway-api",
 ]
 
 [workspace.package]
@@ -45,6 +46,7 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Internal crates
 sozu-gw-ir = { path = "crates/ir" }
+sozu-gw-gateway-api = { path = "crates/gateway-api" }
 sozu-gw-translator = { path = "crates/translator" }
 sozu-gw-builder = { path = "crates/builder" }
 sozu-gw-agent = { path = "crates/sozu-agent" }

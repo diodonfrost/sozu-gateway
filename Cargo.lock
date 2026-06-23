@@ -2352,6 +2352,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sozu-gw-gateway-api"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "sozu-gw-ir"
 version = "0.1.0"
 dependencies = [
