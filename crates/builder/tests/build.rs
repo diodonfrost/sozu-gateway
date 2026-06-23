@@ -10,6 +10,7 @@ use k8s_openapi::ByteString;
 use serde_json::json;
 
 use sozu_gw_builder::{build, BuildConfig, Inputs, Problem};
+use sozu_gw_ir as ir;
 
 const CERT_A: &str = include_str!("fixtures/cert_a.pem");
 const KEY_A: &str = include_str!("fixtures/key_a.pem");
@@ -216,4 +217,79 @@ fn path_types_map_correctly() {
     // Two HTTP frontends (Exact + Regex), resolved via the named service port.
     assert_eq!(out.ir.frontends.len(), 2);
     insta::assert_json_snapshot!(out.ir.frontends);
+}
+
+/// `web` Service carrying the load-balancing + sticky-session annotations.
+fn annotated_service(lb: &str, sticky: &str) -> Service {
+    from_json(json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": { "name": "web", "namespace": "demo",
+            "annotations": {
+                "sozu.io/load-balancing": lb,
+                "sozu.io/sticky-sessions": sticky,
+            } },
+        "spec": { "ports": [{ "name": "http", "port": 80, "targetPort": 8080 }] }
+    }))
+}
+
+#[test]
+fn service_annotations_set_cluster_lb_and_sticky() {
+    let inputs = Inputs {
+        ingresses: vec![ingress_tls()],
+        services: vec![annotated_service("least-loaded", "true")],
+        endpointslices: vec![web_slice()],
+        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert_eq!(out.ir.clusters.len(), 1);
+    assert!(matches!(
+        out.ir.clusters[0].load_balancing,
+        ir::LbAlgorithm::LeastLoaded
+    ));
+    assert!(out.ir.clusters[0].sticky_session);
+}
+
+#[test]
+fn lb_annotation_is_normalised_and_unknown_defaults_to_round_robin() {
+    // Spacing/underscores/case are normalised; an unknown value is not an error,
+    // it just keeps the round-robin default.
+    let cases = [
+        ("Power_Of Two", true), // -> PowerOfTwo
+        ("bogus", false),       // -> RoundRobin (unknown)
+    ];
+    for (value, is_p2c) in cases {
+        let inputs = Inputs {
+            ingresses: vec![ingress_tls()],
+            services: vec![annotated_service(value, "false")],
+            endpointslices: vec![web_slice()],
+            secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+            ..Default::default()
+        };
+        let out = build(&BuildConfig::default(), &inputs);
+        let lb = &out.ir.clusters[0].load_balancing;
+        if is_p2c {
+            assert!(matches!(lb, ir::LbAlgorithm::PowerOfTwo), "value={value:?}");
+        } else {
+            assert!(matches!(lb, ir::LbAlgorithm::RoundRobin), "value={value:?}");
+        }
+        assert!(!out.ir.clusters[0].sticky_session);
+    }
+}
+
+#[test]
+fn no_annotations_keep_round_robin_no_sticky() {
+    let inputs = Inputs {
+        ingresses: vec![ingress_tls()],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert!(matches!(
+        out.ir.clusters[0].load_balancing,
+        ir::LbAlgorithm::RoundRobin
+    ));
+    assert!(!out.ir.clusters[0].sticky_session);
 }

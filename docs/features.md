@@ -31,9 +31,9 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Routing | Ready-endpoint filtering | ✅ | excludes not-ready endpoints |
 | Routing | Hot reload — no proxy restart | ✅ | see [E2E-RESULTS.md](E2E-RESULTS.md) |
 | Routing | Idempotent reconcile + periodic resync | ✅ | |
-| Routing | Load-balancing algorithm selection | 🟡 | fixed round-robin today |
-| Routing | Sticky sessions | 🟡 | Sōzu supports it; not exposed |
-| Routing | Per-endpoint weights | 🟡 | IR supports it; equal weights today |
+| Routing | Load-balancing algorithm selection | ✅ | Service annotation `sozu.io/load-balancing` (round-robin/random/least-loaded/power-of-two) |
+| Routing | Sticky sessions | ✅ | Service annotation `sozu.io/sticky-sessions: "true"` |
+| Routing | Per-endpoint weights | 🟡 | IR + translator support it; no standard K8s per-endpoint weight to map from |
 | API gateway | Request/response header edits | ✅ | via HTTPRoute `RequestHeaderModifier`/`ResponseHeaderModifier` (Sōzu has no append → `add` applied as set) |
 | API gateway | URL rewrite (host + full path) | ✅ | `URLRewrite`; `replacePrefixMatch` not yet |
 | API gateway | Redirects (scheme + status) | ✅ | `RequestRedirect` (HTTP→HTTPS, 301/302); host/path/port target not yet |
@@ -73,3 +73,13 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 - **Hard limits.** Matching on header values or query parameters, weighted traffic split across
   several Services, and request mirroring are not expressible in Sōzu today, so they are out of
   scope rather than merely deferred.
+
+## Annotations
+
+Cluster-level routing is tuned with annotations on the backing **Service** (a cluster is 1:1 with a
+Service, so both an Ingress and a Gateway route to that Service share one configuration):
+
+| Annotation | Values | Default | Effect |
+| ---------- | ------ | ------- | ------ |
+| `sozu.io/load-balancing` | `round-robin`, `random`, `least-loaded`, `power-of-two` | `round-robin` | Sōzu load-balancing algorithm for the cluster. Unknown values fall back to the default. |
+| `sozu.io/sticky-sessions` | `"true"` / `"false"` | `"false"` | Pin a client to one backend via a Sōzu sticky cookie. |

@@ -22,6 +22,11 @@ pub use gateway::{GatewayClassResult, GatewayResult, RouteParentResult, RouteRes
 
 const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 const LEGACY_CLASS_ANNOTATION: &str = "kubernetes.io/ingress.class";
+/// Service annotation selecting the cluster's load-balancing algorithm:
+/// `round-robin` (default) | `random` | `least-loaded` | `power-of-two`.
+const LB_ANNOTATION: &str = "sozu.io/load-balancing";
+/// Service annotation enabling sticky sessions when set to `"true"`.
+const STICKY_ANNOTATION: &str = "sozu.io/sticky-sessions";
 
 /// Listener addresses and class identity the build is parameterised over.
 #[derive(Debug, Clone)]
@@ -314,6 +319,39 @@ fn resolve_backends(
     Ok((cluster_id, svc_port.port, addrs))
 }
 
+/// Parse the `sozu.io/load-balancing` annotation value. Unknown values (and the
+/// absence of the annotation) fall back to round-robin — a missing/typo'd value
+/// keeps a valid, predictable default rather than failing the whole Service.
+fn parse_lb_algorithm(value: &str) -> ir::LbAlgorithm {
+    match value
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '_'], "-")
+        .as_str()
+    {
+        "random" => ir::LbAlgorithm::Random,
+        "least-loaded" => ir::LbAlgorithm::LeastLoaded,
+        "power-of-two" => ir::LbAlgorithm::PowerOfTwo,
+        _ => ir::LbAlgorithm::RoundRobin,
+    }
+}
+
+/// Cluster-level settings read from the backing Service's annotations:
+/// `(load_balancing, sticky_session)`. The cluster is 1:1 with a Service, so
+/// these live on the Service (not the route) — both Ingress and Gateway refs to
+/// one Service then agree on one cluster config, with no cross-route conflict.
+fn cluster_settings(service: Option<&Service>) -> (ir::LbAlgorithm, bool) {
+    let annotations = service.and_then(|s| s.metadata.annotations.as_ref());
+    let load_balancing = annotations
+        .and_then(|a| a.get(LB_ANNOTATION))
+        .map(|v| parse_lb_algorithm(v))
+        .unwrap_or(ir::LbAlgorithm::RoundRobin);
+    let sticky_session = annotations
+        .and_then(|a| a.get(STICKY_ANNOTATION))
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
+    (load_balancing, sticky_session)
+}
+
 /// Resolve a Service+port and upsert its cluster + pod-IP backends into the
 /// shared accumulators. Shared by the Ingress and Gateway API mappers so both
 /// feed the *same* IR. Returns `(cluster_id, has_ready_endpoints)`.
@@ -326,10 +364,15 @@ pub(crate) fn add_service_route(
     port_ref: &PortRef,
 ) -> Result<(String, bool), Problem> {
     let (cluster_id, _port, addrs) = resolve_backends(index, namespace, service, port_ref)?;
+    let svc = index
+        .services
+        .get(&(namespace.to_string(), service.to_string()))
+        .copied();
+    let (load_balancing, sticky_session) = cluster_settings(svc);
     clusters.entry(cluster_id.clone()).or_insert(ir::Cluster {
         id: cluster_id.clone(),
-        load_balancing: ir::LbAlgorithm::RoundRobin,
-        sticky_session: false,
+        load_balancing,
+        sticky_session,
         https_redirect: false,
     });
     for addr in &addrs {
