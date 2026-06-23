@@ -1,0 +1,41 @@
+---
+source: crates/builder/tests/gateway.rs
+expression: out.ir
+---
+{
+  "clusters": [
+    {
+      "id": "demo.web.80",
+      "load_balancing": "RoundRobin",
+      "sticky_session": false,
+      "https_redirect": false
+    }
+  ],
+  "frontends": [
+    {
+      "hostname": "app.example.com",
+      "path": {
+        "Prefix": "/"
+      },
+      "method": null,
+      "cluster_id": "demo.web.80",
+      "tls": false,
+      "listener": "0.0.0.0:80"
+    }
+  ],
+  "backends": [
+    {
+      "cluster_id": "demo.web.80",
+      "backend_id": "demo.web.80#10.244.0.5:8080",
+      "address": "10.244.0.5:8080",
+      "weight": null
+    },
+    {
+      "cluster_id": "demo.web.80",
+      "backend_id": "demo.web.80#10.244.0.6:8080",
+      "address": "10.244.0.6:8080",
+      "weight": null
+    }
+  ],
+  "certificates": []
+}

@@ -14,7 +14,11 @@ use k8s_openapi::api::core::v1::{Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::Ingress;
 use serde::Serialize;
+use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant};
 use sozu_gw_ir as ir;
+
+mod gateway;
+pub use gateway::{GatewayClassResult, GatewayResult, RouteParentResult, RouteResult};
 
 const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 const LEGACY_CLASS_ANNOTATION: &str = "kubernetes.io/ingress.class";
@@ -24,6 +28,8 @@ const LEGACY_CLASS_ANNOTATION: &str = "kubernetes.io/ingress.class";
 pub struct BuildConfig {
     pub class_name: String,
     pub class_is_default: bool,
+    /// GatewayClass `controllerName` we own (Gateway API).
+    pub controller_name: String,
     pub http_listener: SocketAddr,
     pub https_listener: SocketAddr,
 }
@@ -33,6 +39,7 @@ impl Default for BuildConfig {
         Self {
             class_name: "sozu".to_string(),
             class_is_default: false,
+            controller_name: "sozu.io/gateway-controller".to_string(),
             http_listener: "0.0.0.0:80".parse().expect("const addr"),
             https_listener: "0.0.0.0:443".parse().expect("const addr"),
         }
@@ -47,6 +54,11 @@ pub struct Inputs {
     pub services: Vec<Service>,
     pub endpointslices: Vec<EndpointSlice>,
     pub secrets: Vec<Secret>,
+    // Gateway API (Phase 2). Empty when only Ingress is in use.
+    pub gateway_classes: Vec<GatewayClass>,
+    pub gateways: Vec<Gateway>,
+    pub http_routes: Vec<HttpRoute>,
+    pub reference_grants: Vec<ReferenceGrant>,
 }
 
 /// A problem found while building one Ingress. Surfaced for status + logging;
@@ -61,6 +73,13 @@ pub enum Problem {
     ServicePortNotFound { service: String, port: String },
     NoReadyEndpoints { service: String },
     HostlessRuleSkipped,
+    // Gateway API (Phase 2) — features Sōzu or this phase does not cover yet.
+    UnsupportedTlsMode { mode: String },
+    UnsupportedProtocol { protocol: String },
+    WeightedBackendsUnsupported,
+    HeaderOrQueryMatchUnsupported,
+    FilterUnsupported { kind: String },
+    BackendRefNotPermitted { reference: String },
 }
 
 /// Per-Ingress build result for status reporting.
@@ -75,18 +94,23 @@ pub struct IngressResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BuildOutput {
     pub ir: ir::Ir,
+    /// Per-Ingress results (status/logging).
     pub results: Vec<IngressResult>,
+    /// Gateway API results (Phase 2).
+    pub gateway_classes: Vec<GatewayClassResult>,
+    pub gateways: Vec<GatewayResult>,
+    pub routes: Vec<RouteResult>,
 }
 
 /// A reference to a Service port from an Ingress backend: by number or by name.
-enum PortRef {
+pub(crate) enum PortRef {
     Number(i32),
     Name(String),
 }
 
 // ----------------------------------------------------------------------------
 
-fn meta_nn(namespace: &Option<String>, name: &Option<String>) -> (String, String) {
+pub(crate) fn meta_nn(namespace: &Option<String>, name: &Option<String>) -> (String, String) {
     (
         namespace.clone().unwrap_or_else(|| "default".to_string()),
         name.clone().unwrap_or_default(),
@@ -140,7 +164,7 @@ fn tls_covers(tls_hosts: &BTreeSet<String>, host: &str) -> bool {
 }
 
 /// Extract leaf + chain + key PEM from a TLS Secret (`tls.crt` / `tls.key`).
-fn extract_cert(secret: &Secret) -> Result<(String, Vec<String>, String), String> {
+pub(crate) fn extract_cert(secret: &Secret) -> Result<(String, Vec<String>, String), String> {
     let data = secret
         .data
         .as_ref()
@@ -164,15 +188,15 @@ fn extract_cert(secret: &Secret) -> Result<(String, Vec<String>, String), String
 
 // ----------------------------------------------------------------------------
 
-struct Index<'a> {
-    services: BTreeMap<(String, String), &'a Service>,
-    secrets: BTreeMap<(String, String), &'a Secret>,
+pub(crate) struct Index<'a> {
+    pub(crate) services: BTreeMap<(String, String), &'a Service>,
+    pub(crate) secrets: BTreeMap<(String, String), &'a Secret>,
     /// (namespace, service-name) -> slices
-    slices: BTreeMap<(String, String), Vec<&'a EndpointSlice>>,
+    pub(crate) slices: BTreeMap<(String, String), Vec<&'a EndpointSlice>>,
 }
 
 impl<'a> Index<'a> {
-    fn build(inputs: &'a Inputs) -> Self {
+    pub(crate) fn build(inputs: &'a Inputs) -> Self {
         let mut services = BTreeMap::new();
         for svc in &inputs.services {
             services.insert(meta_nn(&svc.metadata.namespace, &svc.metadata.name), svc);
@@ -290,6 +314,36 @@ fn resolve_backends(
     Ok((cluster_id, svc_port.port, addrs))
 }
 
+/// Resolve a Service+port and upsert its cluster + pod-IP backends into the
+/// shared accumulators. Shared by the Ingress and Gateway API mappers so both
+/// feed the *same* IR. Returns `(cluster_id, has_ready_endpoints)`.
+pub(crate) fn add_service_route(
+    index: &Index,
+    clusters: &mut BTreeMap<String, ir::Cluster>,
+    backends: &mut BTreeMap<String, ir::Backend>,
+    namespace: &str,
+    service: &str,
+    port_ref: &PortRef,
+) -> Result<(String, bool), Problem> {
+    let (cluster_id, _port, addrs) = resolve_backends(index, namespace, service, port_ref)?;
+    clusters.entry(cluster_id.clone()).or_insert(ir::Cluster {
+        id: cluster_id.clone(),
+        load_balancing: ir::LbAlgorithm::RoundRobin,
+        sticky_session: false,
+        https_redirect: false,
+    });
+    for addr in &addrs {
+        let backend_id = format!("{cluster_id}#{addr}");
+        backends.entry(backend_id.clone()).or_insert(ir::Backend {
+            cluster_id: cluster_id.clone(),
+            backend_id,
+            address: *addr,
+            weight: None,
+        });
+    }
+    Ok((cluster_id, !addrs.is_empty()))
+}
+
 /// Compile all our-class Ingresses (+ resolved deps) into the IR.
 pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
     let index = Index::build(inputs);
@@ -376,27 +430,19 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                     }
                 };
 
-                match resolve_backends(&index, &namespace, &svc_backend.name, &port_ref) {
+                match add_service_route(
+                    &index,
+                    &mut clusters,
+                    &mut backends,
+                    &namespace,
+                    &svc_backend.name,
+                    &port_ref,
+                ) {
                     Err(problem) => problems.push(problem),
-                    Ok((cluster_id, _port, addrs)) => {
-                        clusters.entry(cluster_id.clone()).or_insert(ir::Cluster {
-                            id: cluster_id.clone(),
-                            load_balancing: ir::LbAlgorithm::RoundRobin,
-                            sticky_session: false,
-                            https_redirect: false,
-                        });
-                        if addrs.is_empty() {
+                    Ok((cluster_id, has_endpoints)) => {
+                        if !has_endpoints {
                             problems.push(Problem::NoReadyEndpoints {
                                 service: svc_backend.name.clone(),
-                            });
-                        }
-                        for addr in &addrs {
-                            let backend_id = format!("{cluster_id}#{addr}");
-                            backends.entry(backend_id.clone()).or_insert(ir::Backend {
-                                cluster_id: cluster_id.clone(),
-                                backend_id,
-                                address: *addr,
-                                weight: None,
                             });
                         }
 
@@ -432,6 +478,17 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         });
     }
 
+    // Gateway API (Phase 2): same accumulators, same IR.
+    let gw = gateway::build_gateway(
+        cfg,
+        inputs,
+        &index,
+        &mut clusters,
+        &mut backends,
+        &mut frontends,
+        &mut certificates,
+    );
+
     // Deterministic frontend ordering (the Translator re-canonicalises anyway).
     frontends.sort_by(|a, b| {
         (a.tls, &a.hostname, &a.cluster_id).cmp(&(b.tls, &b.hostname, &b.cluster_id))
@@ -453,5 +510,8 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
             certificates,
         },
         results,
+        gateway_classes: gw.classes,
+        gateways: gw.gateways,
+        routes: gw.routes,
     }
 }

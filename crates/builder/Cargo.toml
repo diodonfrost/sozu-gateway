@@ -10,8 +10,10 @@ publish.workspace = true
 # Uses k8s-openapi *types* but performs no live API I/O itself.
 [dependencies]
 sozu-gw-ir = { workspace = true }
+sozu-gw-gateway-api = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 # Reuse Sōzu's PEM chain splitter for TLS Secret handling (no socket I/O).
 sozu-command-lib = { workspace = true }
 
@@ -22,5 +24,6 @@ features = ["v1_36"]
 [dev-dependencies]
 insta = { version = "1", features = ["json", "redactions"] }
 serde_json = { workspace = true }
-# Integration tests construct k8s objects, so the type crate must be a dev-dep too.
+# Integration tests construct k8s objects, so the type crates must be dev-deps too.
 k8s-openapi = { version = "0.28", features = ["v1_36"] }
+sozu-gw-gateway-api = { workspace = true }

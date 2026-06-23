@@ -67,5 +67,8 @@ expression: out
       "accepted": true,
       "problems": []
     }
-  ]
+  ],
+  "gateway_classes": [],
+  "gateways": [],
+  "routes": []
 }

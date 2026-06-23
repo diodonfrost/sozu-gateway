@@ -86,6 +86,7 @@ fn happy_path_http_and_tls() {
         services: vec![web_service()],
         endpointslices: vec![web_slice()],
         secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
 
@@ -109,6 +110,7 @@ fn ignores_other_ingress_class() {
         services: vec![web_service()],
         endpointslices: vec![web_slice()],
         secrets: vec![],
+        ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
     assert!(out.ir.clusters.is_empty());
@@ -125,6 +127,7 @@ fn missing_secret_reports_problem_and_skips_tls() {
         services: vec![web_service()],
         endpointslices: vec![web_slice()],
         secrets: vec![], // secret absent
+        ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
     assert_eq!(out.ir.certificates.len(), 0, "no cert without the secret");
@@ -144,6 +147,7 @@ fn service_not_found_reports_problem() {
         services: vec![], // service absent
         endpointslices: vec![],
         secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
     assert!(out.ir.clusters.is_empty());
@@ -171,6 +175,7 @@ fn no_ready_endpoints_keeps_cluster_reports_problem() {
         services: vec![web_service()],
         endpointslices: vec![slice],
         secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
     assert_eq!(out.ir.clusters.len(), 1, "cluster is still declared");
@@ -205,6 +210,7 @@ fn path_types_map_correctly() {
         services: vec![web_service()],
         endpointslices: vec![web_slice()],
         secrets: vec![],
+        ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
     // Two HTTP frontends (Exact + Regex), resolved via the named service port.
