@@ -9,8 +9,8 @@ A Kubernetes Ingress controller / API gateway built on the [Sōzu](https://githu
 reverse proxy. The controller watches Kubernetes objects, compiles them into a neutral
 intermediate representation (IR), diffs that IR against the last-applied state, and pushes the
 minimal set of mutations to a co-located Sōzu instance over its protobuf **command socket** —
-hot, with no proxy restarts. **Phase 1 (Ingress + TLS) is complete** and validated end-to-end; see
-[docs/E2E-RESULTS.md](docs/E2E-RESULTS.md).
+hot, with no proxy restarts. **Phase 1 (Ingress + TLS) and Phase 2 (Gateway API) are implemented**
+and validated end-to-end; see [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md).
 
 ## Commands
 
@@ -41,14 +41,15 @@ make e2e            # full in-cluster end-to-end on the current kube-context
 K8s objects ─▶ reflector caches ─▶ builder ─▶ IR ─▶ translator ─▶ protobuf cmds ─▶ Sōzu socket
 ```
 
-Five workspace crates, layered so the pure ones can be unit-tested without kube or a socket. The
-**purity boundary is load-bearing** — keep `ir`, `builder`, and `translator` free of any I/O
-(no `kube` client, no socket); all I/O lives in `sozu-agent` and `controller`.
+Six workspace crates, layered so the pure ones can be unit-tested without kube or a socket. The
+**purity boundary is load-bearing** — keep `ir`, `builder`, and `translator` free of any socket I/O;
+all socket/kube-client I/O lives in `sozu-agent` and `controller`.
 
 | Crate | Role | I/O |
 |---|---|---|
 | [`crates/ir`](crates/ir) | neutral structs (`Cluster`/`Backend`/`Frontend`/`Certificate`/`Ir`) | none |
-| [`crates/builder`](crates/builder) | typed K8s objects → IR (+ per-Ingress `Problem`s) | none |
+| [`crates/gateway-api`](crates/gateway-api) | Gateway API CRD types, kopium-generated (types only) | none |
+| [`crates/builder`](crates/builder) | typed Ingress **+ Gateway API** objects → IR (+ `Problem`s/results) | none |
 | [`crates/translator`](crates/translator) | pure IR → Sōzu commands, diff vs last-applied | none |
 | [`crates/sozu-agent`](crates/sozu-agent) | wrapper around `sozu-command-lib` (socket, ack loop) | **socket** |
 | [`crates/controller`](crates/controller) | kube-rs watch/reconcile loop, wires it together | **kube + socket** |
@@ -56,7 +57,8 @@ Five workspace crates, layered so the pure ones can be unit-tested without kube 
 ### How the reconcile loop works (`controller/src/main.rs`)
 
 One **singleton, global** reconcile — not per-object. Reflector caches for Ingress, IngressClass,
-Service, EndpointSlice, and Secret each ping a single mpsc channel on any change; a debounced
+Service, EndpointSlice, Secret — and, when the Gateway API CRDs are present, GatewayClass, Gateway,
+HTTPRoute, ReferenceGrant — each ping a single mpsc channel on any change; a debounced
 (`SOZU_GW_DEBOUNCE_MS`) reconcile rebuilds the *entire* desired IR from the caches, diffs it
 against an in-memory **shadow** (the last successfully-applied `Ir`), and applies only the delta.
 A periodic resync (`SOZU_GW_RESYNC_SECS`) self-heals drift.
@@ -89,9 +91,25 @@ the same route key, and adding first would be rejected as a duplicate (`StateErr
 removed (no TLS gap). This also makes the HashSet-ordered routing diff deterministic for
 golden snapshots.
 
+### Gateway API (Phase 2)
+
+`crates/gateway-api` holds **kopium-generated** CRD types (v1.2.1 standard channel,
+`--schema=disabled`; regenerate per its README — do not hand-edit). The builder's
+[`gateway` module](crates/builder/src/gateway.rs) maps GatewayClass/Gateway/HTTPRoute through the
+**same** Service→pod-IP resolver and into the **same** IR as Ingress (a route and an Ingress to one
+Service share a cluster). Gateway listeners map to the static `:80`/`:443` by protocol; cross-ns
+refs are gated on ReferenceGrant. Anything Sōzu can't represent (weighted multi-backend split,
+header/query matches, route filters, TLS passthrough) is reported as a `Problem` and skipped, never
+approximated.
+
+The CRDs are **optional**: the controller probes for them and runs Ingress-only if absent. Status
+(`Accepted`/`Programmed`/`ResolvedRefs`) is written by [`controller/src/status.rs`](crates/controller/src/status.rs),
+which is **loop-safe** — it reuses `lastTransitionTime` for unchanged conditions and skips no-op
+patches, so the controller's own status writes never re-trigger it. Status writes are best-effort.
+
 ### Conventions that matter
 
-- **Listeners are NOT modelled in the IR.** In Phase 1 the HTTP/HTTPS listeners are declared
+- **Listeners are NOT modelled in the IR.** The HTTP/HTTPS listeners are declared
   statically in Sōzu's `config.toml` ([deploy/sozu/config.toml](deploy/sozu/config.toml)) and
   activated at boot. The controller only manages clusters/frontends/backends/certificates; their
   listener addresses come from CLI flags (`--http-listener` / `--https-listener`) and must match
@@ -111,7 +129,9 @@ golden snapshots.
 ### Version pins (verified, do not bump casually)
 
 `sozu-command-lib` **2.1.0** (LGPL-3.0) against Sōzu **2.1.0**, `kube` **4**, `k8s-openapi`
-**0.28** with feature `v1_36` (the e2e cluster's version). Workspace is edition 2021,
+**0.28** with feature `v1_36` (the e2e cluster's version). Gateway API types are generated from the
+**v1.2.1** standard-channel CRDs with `kopium` **0.24** (the published `gateway-api` crate targets
+`kube` 3 / `k8s-openapi` 0.27, so it can't be used here). Workspace is edition 2021,
 rust-version 1.88.
 
 ## Deployment model

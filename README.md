@@ -27,20 +27,24 @@ external dependency and no API token.
 
 ## Status
 
-Phase 1 (Ingress + TLS) is complete and validated end-to-end on a live cluster — see
-[docs/E2E-RESULTS.md](docs/E2E-RESULTS.md): HTTP/HTTPS traffic through Sōzu with SNI certificate
-selection, and **zero-downtime hot reload** (266k requests, 0 errors, while rolling-restarting,
-scaling and editing the Ingress). The project is usable but pre-1.0: APIs and defaults may change.
-Each release publishes the controller image and the Helm chart to ghcr.io.
+Phase 1 (Ingress + TLS) and Phase 2 (Gateway API) are implemented and validated end-to-end on a
+live cluster — see [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md): HTTP/HTTPS traffic through Sōzu with
+SNI certificate selection, **zero-downtime hot reload** (266k requests, 0 errors, while
+rolling-restarting, scaling and editing routes), and Gateway API routing with
+`Accepted`/`Programmed`/`ResolvedRefs` status reporting. The project is usable but pre-1.0: APIs and
+defaults may change. Each release publishes the controller image and the Helm chart to ghcr.io.
 
-The Gateway API (`Gateway`/`HTTPRoute`) and Ingress status reporting are planned for Phase 2.
+The API-gateway filters (header edits, rewrites, redirects, auth, rate limiting) are planned for
+Phase 3 — see the [feature matrix](docs/features.md).
 
 ## Features
 
-Supported today: Ingress routing (exact + wildcard hosts; `Prefix`/`Exact`/`ImplementationSpecific`
-paths), TLS termination from Secrets with SNI and zero-gap rotation, pod-IP backends from
-EndpointSlices, and idempotent hot reload with no proxy restart. The API-gateway filters (header
-edits, rewrites, redirects, auth, rate limiting) and the Gateway API are planned.
+Supported today: **Ingress** and **Gateway API** (`GatewayClass`/`Gateway`/`HTTPRoute`/
+`ReferenceGrant` with `Accepted`/`Programmed`/`ResolvedRefs` status) routing through one shared IR;
+exact + wildcard hosts; `Prefix`/`Exact`/regex paths; TLS termination from Secrets with SNI and
+zero-gap rotation; pod-IP backends from EndpointSlices; and idempotent hot reload with no proxy
+restart. The API-gateway filters (header edits, rewrites, redirects, auth, rate limiting) are
+planned (Phase 3).
 
 See **[docs/features.md](docs/features.md)** for the full support matrix (supported / planned /
 not supported, with the Sōzu hard limits called out).

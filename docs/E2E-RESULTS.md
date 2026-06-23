@@ -70,6 +70,23 @@ the time the LoadBalancer routes to it, the routes exist.
 > programmed-aware readiness gate (planned). A real version bump must also bump the controller
 > (built against a matching `sozu-command-lib`) and the Sōzu image together.
 
+## 4. Gateway API (Phase 2)
+
+Installing the Gateway API CRDs (v1.2.1 standard channel), then a `GatewayClass`, a `Gateway`
+(HTTP + HTTPS listeners) and an `HTTPRoute` to the demo app:
+
+| Check | Result |
+| ----- | ------ |
+| Controller detects the CRDs | logs `Gateway API detected; watching …` (Ingress-only otherwise) |
+| Routing through Sōzu (same IR/translator) | HTTP **200** + HTTPS **200** |
+| `GatewayClass` status | `Accepted=True` |
+| `Gateway` status | `Accepted=True`, `Programmed=True` |
+| `HTTPRoute` status (per parent) | `Accepted=True`, `ResolvedRefs=True` |
+| Status loop-safety | `HTTPRoute` `resourceVersion` stable over 12 s — no self-triggered loop |
+
+A Gateway route and an Ingress to the same Service share one Sōzu cluster, confirming both APIs
+compile to the same IR.
+
 ## Reproduce
 
 ```sh

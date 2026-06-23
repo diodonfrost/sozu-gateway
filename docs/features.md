@@ -1,6 +1,7 @@
 # Feature support
 
-What the controller does and does not do today (Phase 1). It distinguishes what Sōzu
+What the controller does and does not do today (Phase 1 Ingress + TLS, Phase 2 Gateway
+API). It distinguishes what Sōzu
 **fundamentally cannot do** from what is simply **not wired up yet**, so a hard constraint is never
 mistaken for a roadmap item.
 
@@ -41,13 +42,22 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | API gateway | Match on header value / query param | ❌ | not supported by Sōzu |
 | API gateway | Weighted split across multiple Services | ❌ | not supported by Sōzu |
 | API gateway | Request mirroring / shadowing | ❌ | not supported by Sōzu |
-| Gateway API | `GatewayClass` / `Gateway` / `HTTPRoute` | 🟡 | Phase 2 |
-| Gateway API | `ReferenceGrant`, status conditions | 🟡 | Phase 2 |
+| Gateway API | `GatewayClass` (by `controllerName`) | ✅ | status `Accepted` reported |
+| Gateway API | `Gateway` HTTP/HTTPS listeners | ✅ | mapped to the static `:80`/`:443`; status `Accepted`/`Programmed` |
+| Gateway API | `HTTPRoute` (host, path, method) | ✅ | status `Accepted`/`ResolvedRefs` per parent |
+| Gateway API | `ReferenceGrant` (cross-namespace refs) | ✅ | gates cross-ns backend/cert refs |
+| Gateway API | One Service `backendRef` per rule | ✅ | |
+| Gateway API | Weighted multi-`backendRef` split | ❌ | not supported by Sōzu |
+| Gateway API | Header/query matches | ❌ | not supported by Sōzu |
+| Gateway API | Route filters (header edit, redirect, rewrite…) | 🟡 | Phase 3 (Sōzu data-plane ready) |
+| Gateway API | TLS `Passthrough` | ❌ | terminate only |
+| Gateway API | `GRPCRoute` / `TCPRoute` / `TLSRoute` | ❌ | HTTPRoute only |
 | Protocols | HTTP / HTTPS (L7) | ✅ | |
 | Protocols | TCP / UDP ingress (L4) | ❌ | Sōzu supports it; not wired |
 | Operations | Exposure via `Service type=LoadBalancer` | ✅ | |
 | Operations | Structured logs (`tracing`) | ✅ | |
-| Operations | Ingress `status` write-back (conditions) | 🟡 | Phase 2 (`rbac.allowStatusWrites`) |
+| Operations | Gateway API status write-back (loop-safe) | ✅ | Accepted/Programmed/ResolvedRefs |
+| Operations | Ingress `status` write-back (loadBalancer) | 🟡 | `rbac.allowStatusWrites` |
 | Operations | Dedicated `/healthz` readiness gate | ❌ | not yet (see e2e caveats) |
 
 ## Notes

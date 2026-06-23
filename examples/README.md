@@ -6,6 +6,7 @@ Manifests that exercise the Sōzu gateway on a real cluster. They assume the add
 | File | What it shows |
 | ---- | ------------- |
 | [demo-app.yaml](demo-app.yaml) | A 2-replica `whoami` Deployment + Service + a TLS `Ingress` of class `sozu` (host `app.example.com`, `pathType: Prefix`). |
+| [gateway-api.yaml](gateway-api.yaml) | The same app exposed via the **Gateway API**: a `GatewayClass`, a `Gateway` (HTTP + HTTPS listeners) and an `HTTPRoute`. Requires the Gateway API CRDs installed in the cluster. |
 
 ## Run it
 
