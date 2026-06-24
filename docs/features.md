@@ -57,7 +57,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Operations | Exposure via `Service type=LoadBalancer` | ✅ | |
 | Operations | Structured logs (`tracing`) | ✅ | |
 | Operations | Gateway API status write-back (loop-safe) | ✅ | Accepted/Programmed/ResolvedRefs |
-| Operations | Ingress `status` write-back (loadBalancer) | 🟡 | `rbac.allowStatusWrites` |
+| Operations | Ingress `status` write-back (loadBalancer) | ✅ | publishes the gateway LB address; enable with `rbac.allowStatusWrites` |
 | Operations | Dedicated `/healthz` readiness gate | ❌ | not yet (see e2e caveats) |
 
 ## Notes

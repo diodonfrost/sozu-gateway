@@ -70,6 +70,11 @@ struct Args {
     /// Periodic full resync interval (self-heals any drift).
     #[arg(long, env = "SOZU_GW_RESYNC_SECS", default_value = "60")]
     resync_secs: u64,
+    /// Publish this Service's LoadBalancer address into managed Ingresses'
+    /// `.status` (format `namespace/name`). Unset = don't write Ingress status.
+    /// Requires the `ingresses/status` RBAC (Helm `rbac.allowStatusWrites`).
+    #[arg(long, env = "SOZU_GW_PUBLISH_SERVICE")]
+    publish_service: Option<String>,
 }
 
 /// Reflector read handles for every watched resource type.
@@ -235,6 +240,26 @@ async fn reconcile(
     )
     .await;
 
+    // Publish the gateway's LoadBalancer address into each Ingress's status by
+    // reading our own Service from the cache. Best-effort + loop-safe (the write
+    // is skipped when already current, so it never re-triggers a real reconcile).
+    if let Some((ns, name)) = args
+        .publish_service
+        .as_deref()
+        .and_then(|s| s.split_once('/'))
+    {
+        let points = inputs
+            .services
+            .iter()
+            .find(|s| {
+                s.metadata.namespace.as_deref() == Some(ns)
+                    && s.metadata.name.as_deref() == Some(name)
+            })
+            .map(status::lb_points)
+            .unwrap_or_default();
+        status::write_ingress_status(client, &out.results, &points).await;
+    }
+
     // Shadow advances only on a successful socket apply. On failure it stays at
     // the previous applied IR; because every emitted request is idempotent,
     // re-diffing from the unchanged shadow on the next pass safely converges.
@@ -254,6 +279,12 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     info!(?args, "starting sozu gateway controller");
+
+    if let Some(ps) = &args.publish_service {
+        if ps.split_once('/').is_none() {
+            warn!(publish_service = %ps, "--publish-service must be namespace/name; Ingress status will not be written");
+        }
+    }
 
     let client = Client::try_default()
         .await

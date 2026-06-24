@@ -80,6 +80,12 @@ spec:
               value: {{ .Values.controller.debounceMs | quote }}
             - name: SOZU_GW_RESYNC_SECS
               value: {{ .Values.controller.resyncSecs | quote }}
+            {{- if .Values.rbac.allowStatusWrites }}
+            # Publish this gateway's LoadBalancer address into managed Ingresses'
+            # .status (needs the ingresses/status grant gated by the same flag).
+            - name: SOZU_GW_PUBLISH_SERVICE
+              value: "{{ .Release.Namespace }}/{{ include "sozu-gateway.fullname" . }}"
+            {{- end }}
             - name: RUST_LOG
               value: {{ .Values.controller.logLevel | quote }}
           volumeMounts:

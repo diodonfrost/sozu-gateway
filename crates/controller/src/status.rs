@@ -9,13 +9,15 @@
 //! re-trigger a reconcile. **Best-effort:** every failure is logged, never
 //! propagated, so status reporting can never break routing.
 
+use k8s_openapi::api::core::v1::Service;
+use k8s_openapi::api::networking::v1::{Ingress, IngressLoadBalancerIngress};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kube::api::{Patch, PatchParams};
 use kube::{Api, Client};
 use serde_json::json;
 use tracing::{debug, warn};
 
-use sozu_gw_builder::{GatewayClassResult, GatewayResult, RouteResult};
+use sozu_gw_builder::{GatewayClassResult, GatewayResult, IngressResult, RouteResult};
 use sozu_gw_gateway_api::httproute::{HttpRouteStatusParents, HttpRouteStatusParentsParentRef};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute};
 
@@ -230,4 +232,99 @@ async fn write_route(
         .await?;
     debug!(namespace = %route.namespace, name = %route.name, "HTTPRoute status updated");
     Ok(())
+}
+
+// ---- Ingress status (.status.loadBalancer.ingress) -------------------------
+
+/// Map the publish Service's load-balancer address(es) into the shape an Ingress
+/// status expects. Pure, so it is unit-tested without a cluster.
+pub(crate) fn lb_points(svc: &Service) -> Vec<IngressLoadBalancerIngress> {
+    svc.status
+        .as_ref()
+        .and_then(|s| s.load_balancer.as_ref())
+        .and_then(|lb| lb.ingress.as_ref())
+        .map(|points| {
+            points
+                .iter()
+                .map(|p| IngressLoadBalancerIngress {
+                    hostname: p.hostname.clone(),
+                    ip: p.ip.clone(),
+                    ports: None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Publish the gateway's external address into each managed Ingress's
+/// `.status.loadBalancer.ingress`. Loop-safe (skips no-op patches) and
+/// best-effort. Does nothing when there is no address yet, so a still-pending
+/// LoadBalancer never clears an Ingress's status.
+pub async fn write_ingress_status(
+    client: &Client,
+    ingresses: &[IngressResult],
+    points: &[IngressLoadBalancerIngress],
+) {
+    if points.is_empty() {
+        return;
+    }
+    for r in ingresses {
+        if let Err(e) = write_one_ingress(client, &r.namespace, &r.name, points).await {
+            warn!(namespace = %r.namespace, name = %r.name, error = %e, "failed to write Ingress status");
+        }
+    }
+}
+
+async fn write_one_ingress(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    points: &[IngressLoadBalancerIngress],
+) -> Result<(), kube::Error> {
+    let api: Api<Ingress> = Api::namespaced(client.clone(), namespace);
+    let current = api.get(name).await?;
+    let cur = current
+        .status
+        .as_ref()
+        .and_then(|s| s.load_balancer.as_ref())
+        .and_then(|lb| lb.ingress.as_deref())
+        .unwrap_or_default();
+    if cur == points {
+        return Ok(()); // already published — skip to stay loop-safe
+    }
+    let patch = json!({ "status": { "loadBalancer": { "ingress": points } } });
+    api.patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await?;
+    debug!(namespace = %namespace, name = %name, "Ingress status updated");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lb_points_extracts_ip_and_hostname() {
+        let svc: Service = serde_json::from_value(json!({
+            "metadata": { "name": "gw", "namespace": "sozu-system" },
+            "status": { "loadBalancer": { "ingress": [
+                { "ip": "1.2.3.4" },
+                { "hostname": "lb.example.com" }
+            ] } }
+        }))
+        .unwrap();
+        let pts = lb_points(&svc);
+        assert_eq!(pts.len(), 2);
+        assert_eq!(pts[0].ip.as_deref(), Some("1.2.3.4"));
+        assert_eq!(pts[1].hostname.as_deref(), Some("lb.example.com"));
+    }
+
+    #[test]
+    fn lb_points_empty_when_no_loadbalancer_status() {
+        let svc: Service = serde_json::from_value(json!({
+            "metadata": { "name": "gw", "namespace": "sozu-system" }
+        }))
+        .unwrap();
+        assert!(lb_points(&svc).is_empty());
+    }
 }
