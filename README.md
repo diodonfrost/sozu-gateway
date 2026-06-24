@@ -210,7 +210,12 @@ controller manages only clusters, frontends, backends and certificates over the 
 
 ## License
 
-See the [license](LICENSE) (GNU AGPL v3).
+Licensed under the [Apache License 2.0](LICENSE).
+
+The controller links `sozu-command-lib` (LGPL-3.0) only for the command-socket
+protocol types; the LGPL permits this from Apache-2.0 code. Sōzu itself (AGPL-3.0)
+runs as a separate process reached over a socket, so its license does not extend
+to this controller.
 
 ## Getting in touch
 

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 # IR = neutral Rust structs mapped 1:1 onto Sōzu's vocabulary.
 # MUST stay free of I/O: no kube, no socket, no sozu-command-lib.

@@ -20,6 +20,7 @@ members = [
 edition = "2021"
 rust-version = "1.88"
 publish = false
+license = "Apache-2.0"
 
 [workspace.dependencies]
 # Data-plane protocol: official LGPL-3.0 crate. We reuse its protobuf types and

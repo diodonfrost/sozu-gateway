@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 # sozu-agent = thin wrapper around sozu-command-lib: connect to the command
 # socket, send requests idempotently, LoadState, handle reconnection/errors.

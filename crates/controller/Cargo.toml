@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 # controller = the binary: kube-rs Controller runtime (watchers, reconcile,
 # error_policy), wiring builder -> translator -> sozu-agent.

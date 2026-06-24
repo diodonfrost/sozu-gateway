@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 # Gateway API CRD types, generated from the upstream v1.2.1 standard-channel CRDs
 # with `kopium` (see crates/gateway-api/README.md). Types only — `kube` is pulled

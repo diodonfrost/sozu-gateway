@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 # Translator = pure function IR -> Sōzu commands, diffing against last-applied
 # state. No side effects. Depends on the IR and on sozu-command-lib *types only*
