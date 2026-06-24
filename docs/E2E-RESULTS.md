@@ -63,12 +63,12 @@ Why it held: the rolling update keeps the old, already-programmed Pod serving un
 `Ready`, and the new Pod's co-located controller programs Sōzu within the readiness delay — so by
 the time the LoadBalancer routes to it, the routes exist.
 
-> **Caveat — not yet a guarantee.** This currently depends on readiness timing covering the
-> "program gap": the Sōzu readiness probe is a plain TCP check, not a *routes-programmed* gate, and
-> `maxUnavailable=0` relies on percentage rounding at low replica counts. For a robust data-plane
-> upgrade, run `replicaCount >= 2`, set `maxUnavailable=0` explicitly, and prefer a
-> programmed-aware readiness gate (planned). A real version bump must also bump the controller
-> (built against a matching `sozu-command-lib`) and the Sōzu image together.
+> **Program gap — now gated.** The controller container exposes `/readyz`, which turns green only
+> after its first successful reconcile (Sōzu programmed). A fresh Pod is therefore `Ready` — and
+> joins the Service — only once its routes exist, closing the cold-start "program gap" the plain
+> Sōzu TCP probe left open. For a robust data-plane upgrade still run `replicaCount >= 2` and set
+> `maxUnavailable=0` explicitly. A real version bump must also bump the controller (built against a
+> matching `sozu-command-lib`) and the Sōzu image together.
 
 ## 4. Gateway API (Phase 2)
 
@@ -114,8 +114,5 @@ replacement) and `phase3-e2e.sh` (HTTPRoute filters, section 5).
 
 ## Known limitations
 
-- Ingress `status` is not written back yet (problems are logged); planned for Phase 2
-  (`rbac.allowStatusWrites` already gates the permissions).
-- No dedicated `/healthz`: readiness is not yet gated on "first reconcile done" (see section 3).
 - Restarting only the controller container resets its in-memory shadow to empty; it re-applies
   everything (idempotent) but will not prune residual Sōzu state until a later change removes it.

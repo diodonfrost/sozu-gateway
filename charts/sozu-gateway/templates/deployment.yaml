@@ -80,6 +80,8 @@ spec:
               value: {{ .Values.controller.debounceMs | quote }}
             - name: SOZU_GW_RESYNC_SECS
               value: {{ .Values.controller.resyncSecs | quote }}
+            - name: SOZU_GW_HEALTH_LISTEN
+              value: "0.0.0.0:{{ .Values.controller.healthPort | default 8081 }}"
             {{- if .Values.rbac.allowStatusWrites }}
             # Publish this gateway's LoadBalancer address into managed Ingresses'
             # .status (needs the ingresses/status grant gated by the same flag).
@@ -88,6 +90,25 @@ spec:
             {{- end }}
             - name: RUST_LOG
               value: {{ .Values.controller.logLevel | quote }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.controller.healthPort | default 8081 }}
+          # Readiness only goes green once the controller has programmed Sōzu, so
+          # a fresh Pod (start, rolling update, scale-out) takes no traffic until
+          # its routes exist. Liveness is independent: it is up from boot.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
           volumeMounts:
             - name: sozu-run
               mountPath: /run/sozu

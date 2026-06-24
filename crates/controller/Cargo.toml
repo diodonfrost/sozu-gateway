@@ -16,7 +16,7 @@ sozu-gw-gateway-api = { workspace = true }
 
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }

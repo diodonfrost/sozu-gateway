@@ -12,6 +12,8 @@
 
 use std::hash::Hash;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -35,6 +37,7 @@ use sozu_gw_builder::{build, BuildConfig, Inputs};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant};
 use sozu_gw_translator as tr;
 
+mod health;
 mod status;
 
 const DEFAULT_CLASS_ANNOTATION: &str = "ingressclass.kubernetes.io/is-default-class";
@@ -75,6 +78,9 @@ struct Args {
     /// Requires the `ingresses/status` RBAC (Helm `rbac.allowStatusWrites`).
     #[arg(long, env = "SOZU_GW_PUBLISH_SERVICE")]
     publish_service: Option<String>,
+    /// Bind address for the health endpoints (`/healthz`, `/readyz`).
+    #[arg(long, env = "SOZU_GW_HEALTH_LISTEN", default_value = "0.0.0.0:8081")]
+    health_listen: SocketAddr,
 }
 
 /// Reflector read handles for every watched resource type.
@@ -145,6 +151,15 @@ where
     K::DynamicType: Hash + Eq + Clone,
 {
     store.state().iter().map(|a| (**a).clone()).collect()
+}
+
+/// Latch readiness on the first successful reconcile (logging the transition).
+/// Never unset: a later transient failure must not pull a serving Pod out of the
+/// Service's endpoints.
+fn mark_ready(ready: &AtomicBool) {
+    if !ready.swap(true, Ordering::Relaxed) {
+        info!("controller ready: first reconcile complete");
+    }
 }
 
 /// Are the Gateway API CRDs installed? Probed by a tiny list against
@@ -289,6 +304,12 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Health endpoints come up immediately: /healthz (liveness) is green now,
+    // while /readyz (readiness) stays 503 until the first reconcile has
+    // programmed Sōzu, so the Pod takes no traffic during the cold-start gap.
+    let ready = Arc::new(AtomicBool::new(false));
+    health::spawn(args.health_listen, ready.clone());
+
     let client = Client::try_default()
         .await
         .context("create kube client (in-cluster or kubeconfig)")?;
@@ -364,9 +385,10 @@ async fn main() -> Result<()> {
     let mut resync = tokio::time::interval(Duration::from_secs(args.resync_secs));
     resync.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // Initial reconcile (full apply).
-    if let Err(e) = reconcile(&args, &client, &stores, &agent, &mut shadow).await {
-        error!(error = ?e, "initial reconcile failed; will retry");
+    // Initial reconcile (full apply). Readiness latches once this succeeds.
+    match reconcile(&args, &client, &stores, &agent, &mut shadow).await {
+        Ok(()) => mark_ready(&ready),
+        Err(e) => error!(error = ?e, "initial reconcile failed; will retry"),
     }
 
     loop {
@@ -383,8 +405,9 @@ async fn main() -> Result<()> {
             }
         }
 
-        if let Err(e) = reconcile(&args, &client, &stores, &agent, &mut shadow).await {
-            error!(error = ?e, "reconcile failed; will retry on next event/resync");
+        match reconcile(&args, &client, &stores, &agent, &mut shadow).await {
+            Ok(()) => mark_ready(&ready),
+            Err(e) => error!(error = ?e, "reconcile failed; will retry on next event/resync"),
         }
     }
 
