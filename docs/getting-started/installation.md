@@ -67,7 +67,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/downloa
 ```
 
 Then create a `GatewayClass` (with `controllerName: sozu.io/gateway-controller`), a `Gateway` and an
-`HTTPRoute` — see [examples/gateway-api.yaml](../../examples/gateway-api.yaml). The controller
+`HTTPRoute` — see [examples/api-gateway/gateway-api.yaml](../../examples/api-gateway/gateway-api.yaml). The controller
 reports `Accepted`/`Programmed`/`ResolvedRefs` status back on those objects.
 
 ## Step 3 — Route an application
@@ -75,7 +75,7 @@ reports `Accepted`/`Programmed`/`ResolvedRefs` status back on those objects.
 Deploy a demo app and an Ingress of class `sozu` (see [examples/](../../examples/README.md)):
 
 ```sh
-kubectl apply -f examples/demo-app.yaml
+kubectl apply -f examples/ingress/demo-app.yaml
 ```
 
 Then send a request through the proxy (replace `<lb-ip>` with the Service's external IP):

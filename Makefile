@@ -51,7 +51,7 @@ e2e: ## Run the in-cluster end-to-end test
 
 clean: ## Tear down e2e resources + cargo clean
 	-helm uninstall $(HELM_RELEASE) -n $(HELM_NS)
-	-kubectl delete -f examples/demo-app.yaml
+	-kubectl delete -f examples/ingress/demo-app.yaml
 	rm -rf dist
 	cargo clean
 

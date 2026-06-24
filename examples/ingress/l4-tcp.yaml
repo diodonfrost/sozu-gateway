@@ -1,0 +1,58 @@
+# Raw TCP (L4) forwarding — expose a non-HTTP Service through the gateway.
+#
+# L4 is configured by the chart, not by an Ingress object: a port is mapped to a
+# Service, opened on the LoadBalancer, and forwarded by Sōzu (one port -> one
+# Service, no host routing). Enable it on install/upgrade with:
+#
+#   helm upgrade --install sozu-gateway charts/sozu-gateway -n sozu-system \
+#     --set l4.tcpServices.9000="sozu-demo/echo-tcp:9000"
+#
+# That renders a `tcp-services` ConfigMap, opens port 9000 on the Service, and
+# points the controller at it. This file is just the backend the port forwards to
+# (a tiny TCP echo). Listen ports must be > 1024 (the data plane is unprivileged).
+#
+# Verify (no HTTP — raw TCP):
+#   printf 'hello-l4\n' | nc <lb-ip> 9000      # echoes: hello-l4
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sozu-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-tcp
+  namespace: sozu-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-tcp
+  template:
+    metadata:
+      labels:
+        app: echo-tcp
+    spec:
+      containers:
+        - name: socat
+          image: alpine/socat:1.8.0.0
+          args: ["TCP-LISTEN:9000,fork,reuseaddr", "EXEC:/bin/cat"]
+          ports:
+            - name: tcp
+              containerPort: 9000
+          readinessProbe:
+            tcpSocket:
+              port: tcp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-tcp
+  namespace: sozu-demo
+spec:
+  selector:
+    app: echo-tcp
+  ports:
+    - name: tcp
+      port: 9000
+      targetPort: tcp

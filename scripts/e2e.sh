@@ -34,7 +34,7 @@ helm upgrade --install "$RELEASE" charts/sozu-gateway -n "$NS" --create-namespac
   --wait --timeout 180s
 
 echo "==> deploy demo app + TLS secret"
-kubectl apply -f examples/demo-app.yaml
+kubectl apply -f examples/ingress/demo-app.yaml
 CERTDIR="$(mktemp -d)"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
   -keyout "$CERTDIR/tls.key" -out "$CERTDIR/tls.crt" -days 365 \

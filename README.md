@@ -77,7 +77,7 @@ Then expose an application by creating an `Ingress` of class `sozu` — see the
 [examples/](examples/README.md) catalog:
 
 ```
-$ kubectl apply -f examples/demo-app.yaml
+$ kubectl apply -f examples/ingress/demo-app.yaml
 ```
 
 ### From source
