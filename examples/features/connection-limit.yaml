@@ -1,0 +1,76 @@
+# Per-source-IP connection limit (a connection cap, not an RPS quota).
+#
+# Set on the Service:
+#   sozu.io/max-connections-per-ip: cap of simultaneous connections per client IP
+#   sozu.io/retry-after           : Retry-After (seconds) sent on the 429
+# Over the cap, Sōzu answers 429 Too Many Requests.
+#
+# Verify (whoami's ?wait holds the connection open):
+#   # 6 concurrent slow requests, cap = 2 -> some succeed (200), the rest 429
+#   for i in $(seq 6); do curl -s -o /dev/null -w '%{http_code}\n' \
+#     -H 'Host: limit.example.com' 'http://<lb-ip>/?wait=3s' & done; wait
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sozu-examples
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-limit
+  namespace: sozu-examples
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-limit
+  template:
+    metadata:
+      labels:
+        app: echo-limit
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10.2
+          args: ["--port=8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            tcpSocket:
+              port: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-limit
+  namespace: sozu-examples
+  annotations:
+    sozu.io/max-connections-per-ip: "2"
+    sozu.io/retry-after: "5"
+spec:
+  selector:
+    app: echo-limit
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: echo-limit
+  namespace: sozu-examples
+spec:
+  ingressClassName: sozu
+  rules:
+    - host: limit.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: echo-limit
+                port:
+                  number: 80

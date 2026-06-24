@@ -1,0 +1,78 @@
+# Load-balancing algorithm + sticky sessions.
+#
+# Both are set on the *Service* (a Sōzu cluster is 1:1 with a Service), so every
+# Ingress/HTTPRoute pointing here shares the same load-balancing config.
+#   sozu.io/load-balancing : round-robin | random | least-loaded | power-of-two
+#   sozu.io/sticky-sessions: "true" pins a client to one backend via a cookie
+#
+# Verify (2 replicas):
+#   # without the cookie -> round-robin across pods
+#   for i in $(seq 6); do curl -s -H 'Host: lb.example.com' http://<lb-ip>/ | grep Hostname; done
+#   # with the cookie -> always the same pod
+#   curl -s -c jar -o /dev/null -H 'Host: lb.example.com' http://<lb-ip>/
+#   for i in $(seq 6); do curl -s -b jar -H 'Host: lb.example.com' http://<lb-ip>/ | grep Hostname; done
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sozu-examples
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-lb
+  namespace: sozu-examples
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: echo-lb
+  template:
+    metadata:
+      labels:
+        app: echo-lb
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10.2
+          args: ["--port=8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            tcpSocket:
+              port: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-lb
+  namespace: sozu-examples
+  annotations:
+    sozu.io/load-balancing: least-loaded
+    sozu.io/sticky-sessions: "true"
+spec:
+  selector:
+    app: echo-lb
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: echo-lb
+  namespace: sozu-examples
+spec:
+  ingressClassName: sozu
+  rules:
+    - host: lb.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: echo-lb
+                port:
+                  number: 80

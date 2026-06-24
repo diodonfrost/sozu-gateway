@@ -1,0 +1,102 @@
+# HTTPRoute URLRewrite filter (Gateway API).
+#
+# Rewrites the request line before it reaches the backend:
+#   hostname              -> the Host sent upstream
+#   path.replaceFullPath  -> replaces the whole path
+# (replacePrefixMatch is not supported yet and is reported as a Problem.)
+#
+# Verify (whoami echoes Host + the path it received):
+#   curl -s -H 'Host: rewrite.example.com' http://<lb-ip>/anything \
+#     | grep -E 'Host|GET'      # Host: backend.internal ; GET /v2 ...
+#
+# Requires the Gateway API CRDs installed in the cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sozu-examples
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-rewrite
+  namespace: sozu-examples
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-rewrite
+  template:
+    metadata:
+      labels:
+        app: echo-rewrite
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10.2
+          args: ["--port=8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            tcpSocket:
+              port: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-rewrite
+  namespace: sozu-examples
+spec:
+  selector:
+    app: echo-rewrite
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: sozu
+spec:
+  controllerName: sozu.io/gateway-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: examples-gw
+  namespace: sozu-examples
+spec:
+  gatewayClassName: sozu
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: rewrite
+  namespace: sozu-examples
+spec:
+  parentRefs:
+    - name: examples-gw
+  hostnames: ["rewrite.example.com"]
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            hostname: backend.internal
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /v2
+      backendRefs:
+        - name: echo-rewrite
+          port: 80

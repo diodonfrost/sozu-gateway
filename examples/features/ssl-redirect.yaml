@@ -1,0 +1,82 @@
+# Automatic HTTP -> HTTPS redirect.
+#
+# Any Ingress host that has a loaded TLS cert is redirected from HTTP to HTTPS
+# (301) automatically — no annotation needed. Opt out per Ingress with:
+#   sozu.io/ssl-redirect: "false"   (keep serving plain HTTP)
+#
+# This needs a TLS Secret `echo-tls` in the namespace, e.g.:
+#   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+#     -keyout tls.key -out tls.crt -days 365 -subj '/CN=secure.example.com' \
+#     -addext 'subjectAltName=DNS:secure.example.com'
+#   kubectl create secret tls echo-tls -n sozu-examples --cert=tls.crt --key=tls.key
+#
+# Verify:
+#   curl -i -H 'Host: secure.example.com' http://<lb-ip>/        # 301 -> https://
+#   curl -k --resolve secure.example.com:443:<lb-ip> https://secure.example.com/   # 200
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sozu-examples
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-secure
+  namespace: sozu-examples
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-secure
+  template:
+    metadata:
+      labels:
+        app: echo-secure
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10.2
+          args: ["--port=8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            tcpSocket:
+              port: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-secure
+  namespace: sozu-examples
+spec:
+  selector:
+    app: echo-secure
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: echo-secure
+  namespace: sozu-examples
+  # annotations:
+  #   sozu.io/ssl-redirect: "false"   # uncomment to keep serving plain HTTP
+spec:
+  ingressClassName: sozu
+  tls:
+    - hosts: ["secure.example.com"]
+      secretName: echo-tls
+  rules:
+    - host: secure.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: echo-secure
+                port:
+                  number: 80

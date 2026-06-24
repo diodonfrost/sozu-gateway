@@ -7,6 +7,7 @@ Manifests that exercise the Sōzu gateway on a real cluster. They assume the add
 | ---- | ------------- |
 | [demo-app.yaml](demo-app.yaml) | A 2-replica `whoami` Deployment + Service + a TLS `Ingress` of class `sozu` (host `app.example.com`, `pathType: Prefix`). |
 | [gateway-api.yaml](gateway-api.yaml) | The same app exposed via the **Gateway API**: a `GatewayClass`, a `Gateway` (HTTP + HTTPS listeners), an `HTTPRoute` with header-modifier filters, and a redirect-only `HTTPRoute` (HTTP→HTTPS). Requires the Gateway API CRDs installed in the cluster. |
+| [features/](features/) | One minimal manifest per feature: load-balancing & sticky sessions, per-IP connection limit, HTTP→HTTPS redirect, and HTTPRoute header/rewrite/redirect filters. See [features/README.md](features/README.md). |
 
 ## Run it
 
