@@ -15,6 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install just
+        run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/local/bin
+
       - name: Log in to GitHub Container Registry
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -25,7 +28,7 @@ jobs:
           # ghcr.io requires a lowercase repository name.
           IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/sozu-gateway"
           TAG="${GITHUB_REF_NAME}"
-          make image IMAGE="$IMAGE" TAG="$TAG"
+          just IMAGE="$IMAGE" TAG="$TAG" image
           docker push "$IMAGE:$TAG"
 
       # Chart steps only run for v* tags: a workflow_dispatch run from a branch
@@ -44,5 +47,5 @@ jobs:
           # oci://ghcr.io/<owner>/sozu-gateway.
           REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
           TAG="${GITHUB_REF_NAME}"
-          make chart-package TAG="$TAG"
+          just TAG="$TAG" chart-package
           helm push "dist/sozu-gateway-${TAG#v}.tgz" "oci://$REPO"

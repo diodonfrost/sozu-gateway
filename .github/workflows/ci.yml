@@ -20,6 +20,9 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
 
+      - name: Install just
+        run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/local/bin
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -30,28 +33,29 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Format check
-        run: cargo fmt --check
+        run: just fmt-check
 
       - name: Clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: just clippy
 
       - name: Test
-        run: cargo test --workspace
+        run: just test
 
   helm:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v4
+      - name: Install just
+        run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/local/bin
       - name: Helm lint + template
-        run: |
-          helm lint charts/sozu-gateway
-          helm template sozu-gateway charts/sozu-gateway >/dev/null
-          helm template sozu-gateway charts/sozu-gateway --set rbac.allowStatusWrites=true >/dev/null
+        run: just chart-lint
 
   docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Install just
+        run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/local/bin
       - name: Build controller image
-        run: docker build -t sozu-gw-controller:ci .
+        run: just IMAGE=sozu-gw-controller TAG=ci image

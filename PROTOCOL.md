@@ -272,7 +272,7 @@ curl https app.example.com:8443  -> 200
 openssl s_client -servername app.example.com -> subject CN=app.example.com, SAN app.example.com
 ```
 
-Reproduce: `bash .scratch/run-probe.sh` (will be promoted into the `justfile`/`Makefile`).
+Reproduce: `bash .scratch/run-probe.sh` (will be promoted into the `justfile`).
 
 ---
 

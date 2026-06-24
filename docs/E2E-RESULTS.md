@@ -105,7 +105,7 @@ backends), so it maps to a frontend with no cluster — Sōzu answers the 301 it
 ## Reproduce
 
 ```sh
-make e2e          # functional path: install + demo app + HTTP/HTTPS checks + hot removal
+just e2e          # functional path: install + demo app + HTTP/HTTPS checks + hot removal
 ```
 
 The load/churn harnesses used for sections 2–3 live under `.scratch/` (developer scaffolding, not

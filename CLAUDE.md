@@ -15,14 +15,16 @@ end-to-end; see [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md).
 
 ## Commands
 
+Tasks are run with [`just`](https://github.com/casey/just) (`just` with no args lists them):
+
 ```bash
-make build          # cargo build --workspace
-make test           # cargo test --workspace (unit + golden/snapshot tests)
-make lint           # cargo fmt --check + clippy -D warnings (the CI gate)
-make fmt            # cargo fmt (write)
-make image          # docker build the controller image
-make chart-lint     # helm lint + template (also renders with rbac.allowStatusWrites=true)
-make e2e            # full in-cluster end-to-end on the current kube-context
+just build          # cargo build --workspace
+just test           # cargo test --workspace (unit + golden/snapshot tests)
+just lint           # cargo fmt --check + clippy -D warnings (the CI gate)
+just fmt            # cargo fmt (write)
+just image          # docker build the controller image
+just chart-lint     # helm lint + template (also renders with rbac.allowStatusWrites=true)
+just e2e            # full in-cluster end-to-end on the current kube-context
 ```
 
 - **`protoc` is required to build** — `sozu-command-lib`'s `build.rs` runs `prost-build`. The
@@ -33,8 +35,9 @@ make e2e            # full in-cluster end-to-end on the current kube-context
   `crates/*/tests/snapshots/`. After an intentional change to emitted commands, review/accept
   with `cargo insta review` (or `INSTA_UPDATE=always cargo test`). A diff in a `.snap` is a
   behavior change to scrutinize, not a thing to blindly re-bless.
-- The [Makefile](Makefile) is authoritative for task/command names (`image`, `chart-lint`,
-  `chart-package`, `e2e`, …); keep the README in sync with it.
+- The [justfile](justfile) is authoritative for task/command names (`image`, `chart-lint`,
+  `chart-package`, `e2e`, …); keep the README in sync with it. Override variables before the
+  recipe, e.g. `just IMAGE=my/repo TAG=v0.2.0 image`.
 
 ## Architecture
 

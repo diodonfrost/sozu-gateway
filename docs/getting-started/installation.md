@@ -92,7 +92,7 @@ You should get a `200` served by the backend pod. Deleting the Ingress hot-remov
 Build and push your own image, then install the local chart pointing at it:
 
 ```sh
-make image IMAGE=<your-registry>/sozu-gateway TAG=v0.1.0
+just IMAGE=<your-registry>/sozu-gateway TAG=v0.1.0 image
 docker push <your-registry>/sozu-gateway:v0.1.0
 
 helm upgrade --install sozu-gateway charts/sozu-gateway \
@@ -102,7 +102,7 @@ helm upgrade --install sozu-gateway charts/sozu-gateway \
   --wait
 ```
 
-For a one-command build-install-verify cycle on the current context, run `make e2e` (uses the
+For a one-command build-install-verify cycle on the current context, run `just e2e` (uses the
 anonymous `ttl.sh` registry by default — no credentials needed).
 
 ## Upgrade

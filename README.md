@@ -94,16 +94,18 @@ $ cd sozu-gateway
 
 #### Build the binary
 
+Tasks are run with [`just`](https://github.com/casey/just):
+
 ```
-$ make build      # cargo build --workspace -> target/debug/sozu-gw-controller
-$ make test       # unit + golden/snapshot tests
-$ make lint       # cargo fmt --check + clippy -D warnings (the CI gate)
+$ just build      # cargo build --workspace -> target/debug/sozu-gw-controller
+$ just test       # unit + golden/snapshot tests
+$ just lint       # cargo fmt --check + clippy -D warnings (the CI gate)
 ```
 
 #### Build the docker image
 
 ```
-$ make image IMAGE=<your-registry>/sozu-gateway TAG=v0.1.0
+$ just IMAGE=<your-registry>/sozu-gateway TAG=v0.1.0 image
 $ docker push <your-registry>/sozu-gateway:v0.1.0
 ```
 
@@ -122,8 +124,8 @@ $ helm upgrade --install sozu-gateway charts/sozu-gateway \
 ```
 
 To exercise the whole stack on the current kube-context — build, install, deploy a demo app and
-verify HTTP/HTTPS traffic — run `make e2e` (it uses the anonymous `ttl.sh` registry by default, so
-no credentials are needed; override with `IMAGE=...`).
+verify HTTP/HTTPS traffic — run `just e2e` (it uses the anonymous `ttl.sh` registry by default, so
+no credentials are needed).
 
 ## Credentials
 
