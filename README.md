@@ -31,7 +31,7 @@ Phase 1 (Ingress + TLS), Phase 2 (Gateway API) and Phase 3 (HTTPRoute filters) a
 validated end-to-end on a live cluster — see [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md): HTTP/HTTPS
 traffic through Sōzu with SNI certificate selection, **zero-downtime hot reload** (266k requests,
 0 errors, while rolling-restarting, scaling and editing routes), Gateway API routing with
-`Accepted`/`Programmed`/`ResolvedRefs` status reporting, and HTTPRoute header/redirect/rewrite
+`Accepted`/`Programmed`/`ResolvedRefs` status reporting, and HTTPRoute header/redirect
 filters. The project is usable but pre-1.0: APIs and defaults may change. Each release publishes the
 controller image and the Helm chart to ghcr.io.
 
@@ -43,8 +43,8 @@ remain unwired — see the [feature matrix](docs/features.md).
 Supported today: **Ingress** and **Gateway API** (`GatewayClass`/`Gateway`/`HTTPRoute`/
 `ReferenceGrant` with `Accepted`/`Programmed`/`ResolvedRefs` status) routing through one shared IR;
 exact + wildcard hosts; `Prefix`/`Exact`/regex paths; TLS termination from Secrets with SNI and
-zero-gap rotation; pod-IP backends from EndpointSlices; HTTPRoute filters (header edits, URL
-rewrite, redirects); and idempotent hot reload with no proxy restart. Basic auth and per-IP rate
+zero-gap rotation; pod-IP backends from EndpointSlices; HTTPRoute filters (header edits and
+redirects); and idempotent hot reload with no proxy restart. Basic auth and per-IP rate
 limiting exist in Sōzu but have no core Gateway API filter, so they are not wired yet.
 
 See **[docs/features.md](docs/features.md)** for the full support matrix (supported / planned /

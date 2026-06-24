@@ -246,11 +246,14 @@ fn http_route_filters_map_to_ir() {
         .header_mods
         .iter()
         .any(|m| matches!(m.on, ir::HeaderTarget::Response) && m.key == "X-Served-By"));
-    let rw = f.rewrite.as_ref().expect("rewrite");
-    assert_eq!(rw.hostname.as_deref(), Some("backend.svc"));
-    assert_eq!(rw.path.as_deref(), Some("/v2"));
+    // URLRewrite is reported unsupported (Sōzu's rewrite_host targets the backend
+    // authority, incompatible with Gateway semantics) rather than mapped.
+    assert!(f.rewrite.is_none());
+    assert!(out.routes[0].parents[0]
+        .problems
+        .iter()
+        .any(|p| matches!(p, Problem::FilterUnsupported { kind } if kind == "URLRewrite")));
     assert!(out.routes[0].parents[0].resolved_refs);
-    assert!(out.routes[0].parents[0].problems.is_empty());
 }
 
 #[test]

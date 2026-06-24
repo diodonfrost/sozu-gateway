@@ -35,7 +35,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Routing | Sticky sessions | ✅ | Service annotation `sozu.io/sticky-sessions: "true"` |
 | Routing | Per-endpoint weights | 🟡 | IR + translator support it; no standard K8s per-endpoint weight to map from |
 | API gateway | Request/response header edits | ✅ | via HTTPRoute `RequestHeaderModifier`/`ResponseHeaderModifier` (Sōzu has no append → `add` applied as set) |
-| API gateway | URL rewrite (host + full path) | ✅ | `URLRewrite`; `replacePrefixMatch` not yet |
+| API gateway | URL rewrite (host + full path) | ❌ | `URLRewrite` reported unsupported: Sōzu's `rewrite_host` rewrites the *backend authority* (dials the rewritten host) → route 408s |
 | API gateway | Redirects (scheme + status) | ✅ | `RequestRedirect` (HTTP→HTTPS, 301/302); host/path/port target not yet |
 | API gateway | HTTP Basic auth | 🟡 | Sōzu Cluster field; not wired (no core Gateway filter) |
 | API gateway | Connection limit per source IP | ✅ | Service annotation `sozu.io/max-connections-per-ip` (a connection cap, not an RPS quota) |
@@ -49,7 +49,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Gateway API | One Service `backendRef` per rule | ✅ | |
 | Gateway API | Weighted multi-`backendRef` split | ❌ | not supported by Sōzu |
 | Gateway API | Header/query matches | ❌ | not supported by Sōzu |
-| Gateway API | Route filters (header edit, redirect, rewrite) | ✅ | see the API-gateway rows above |
+| Gateway API | Route filters (header edit, redirect) | ✅ | see the API-gateway rows above (URLRewrite reported unsupported) |
 | Gateway API | TLS `Passthrough` | ❌ | terminate only |
 | Gateway API | `GRPCRoute` / `TCPRoute` / `TLSRoute` | ❌ | HTTPRoute only |
 | Protocols | HTTP / HTTPS (L7) | ✅ | |
@@ -64,10 +64,13 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 
 - **Regex paths (`ImplementationSpecific`).** Sōzu 2.x anchors regexes, so a pattern that matched a
   substring on another controller may need adjusting.
-- **API-gateway filters.** Header edits, redirects (scheme + status) and URL rewrites (host +
-  full path) are exposed through the IR and Gateway API HTTPRoute filters (Phase 3). Sōzu has no
-  header *append*, so a Gateway `add` is applied as a set; redirect host/path/port targets and
-  `URLRewrite.replacePrefixMatch` are not expressible yet and are reported rather than half-applied.
+- **API-gateway filters.** Header edits and redirects (scheme + status) are exposed through the IR
+  and Gateway API HTTPRoute filters (Phase 3). Sōzu has no header *append*, so a Gateway `add` is
+  applied as a set; redirect host/path/port targets are not expressible yet and are reported rather
+  than half-applied. `URLRewrite` is reported unsupported: Sōzu's `rewrite_host`/`rewrite_path`
+  rewrite the *backend authority* (the proxy dials the rewritten host) and expect regex-capture
+  templates, which is incompatible with the Gateway semantics (rewrite the forwarded Host/path
+  toward the same backend) — a literal mapping makes the route time out (408).
   The per-source-IP connection limit is wired through Service annotations (see below). HTTP Basic
   auth exists in Sōzu's data plane but has no core Gateway API filter, so it remains unwired.
 - **Hard limits.** Matching on header values or query parameters, weighted traffic split across

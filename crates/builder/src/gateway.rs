@@ -12,12 +12,14 @@
 //!    (`PathPrefix`/`Exact`/`RegularExpression`) and method matches, and either
 //!    one Service `backendRef` or a redirect-only rule (no backend);
 //!  - filters (Phase 3): RequestHeaderModifier / ResponseHeaderModifier,
-//!    RequestRedirect (scheme + status), URLRewrite (hostname + replaceFullPath);
+//!    RequestRedirect (scheme + status);
 //!  - cross-namespace `backendRefs`/`certificateRefs` honour `ReferenceGrant`.
 //!
 //! Not yet: header/query matches, weighted multi-backend split, TLS Passthrough,
-//! RequestMirror, redirect host/path/port, URLRewrite replacePrefixMatch
-//! (header/query match and weighted split are Sōzu hard limits).
+//! RequestMirror, redirect host/path/port, and URLRewrite (Sōzu's rewrite_host
+//! rewrites the *backend authority* — it dials the rewritten host — so a literal
+//! Gateway rewrite 408s; header/query match and weighted split are Sōzu hard
+//! limits).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -460,8 +462,8 @@ fn path_match(path: Option<&HttpRouteRulesMatchesPath>) -> ir::PathMatch {
 }
 
 /// Parse HTTPRoute filters into neutral IR filters. Supported: header modifiers
-/// (set/add→set, remove→delete), RequestRedirect (scheme + status), URLRewrite
-/// (hostname + replaceFullPath). Unsupported filters/sub-fields are reported.
+/// (set/add→set, remove→delete) and RequestRedirect (scheme + status).
+/// Unsupported filters/sub-fields (incl. URLRewrite) are reported.
 fn parse_filters(
     filters: &[HttpRouteRulesFilters],
     problems: &mut Vec<Problem>,
@@ -539,22 +541,17 @@ fn parse_filters(
                 }
             }
             HttpRouteRulesFiltersType::UrlRewrite => {
-                if let Some(rw) = &filter.url_rewrite {
-                    let mut path = None;
-                    if let Some(p) = &rw.path {
-                        if let Some(full) = &p.replace_full_path {
-                            path = Some(full.clone());
-                        } else {
-                            problems.push(Problem::FilterUnsupported {
-                                kind: "URLRewrite replacePrefixMatch".to_string(),
-                            });
-                        }
-                    }
-                    ff.rewrite = Some(ir::Rewrite {
-                        hostname: rw.hostname.clone(),
-                        path,
-                    });
-                }
+                // Not wired: Sōzu's rewrite_host/rewrite_path rewrite the *backend
+                // authority* (the proxy then dials the rewritten host) and expect
+                // regex-capture templates, whereas Gateway URLRewrite rewrites the
+                // forwarded Host/path toward the *same* backend. Mapping it
+                // literally makes the route 408 (verified end-to-end), so report it
+                // rather than emit a broken frontend. The translator keeps an
+                // ir::Rewrite mapping, so re-wiring is a one-line change should
+                // Sōzu's rewrite semantics be reconciled later.
+                problems.push(Problem::FilterUnsupported {
+                    kind: "URLRewrite".to_string(),
+                });
             }
             HttpRouteRulesFiltersType::RequestMirror | HttpRouteRulesFiltersType::ExtensionRef => {
                 problems.push(Problem::FilterUnsupported {

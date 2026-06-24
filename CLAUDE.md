@@ -10,7 +10,7 @@ reverse proxy. The controller watches Kubernetes objects, compiles them into a n
 intermediate representation (IR), diffs that IR against the last-applied state, and pushes the
 minimal set of mutations to a co-located Sōzu instance over its protobuf **command socket** —
 hot, with no proxy restarts. **Phase 1 (Ingress + TLS), Phase 2 (Gateway API) and Phase 3
-(HTTPRoute filters: header edits, redirect, URL rewrite) are implemented** and validated
+(HTTPRoute filters: header edits, redirect) are implemented** and validated
 end-to-end; see [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md).
 
 ## Commands
@@ -108,13 +108,17 @@ Service share a cluster). Gateway listeners map to the static `:80`/`:443` by pr
 refs are gated on ReferenceGrant. Anything Sōzu can't represent (weighted multi-backend split,
 header/query matches, TLS passthrough) is reported as a `Problem` and skipped, never approximated.
 
-**Phase 3 — HTTPRoute filters.** `RequestHeaderModifier`/`ResponseHeaderModifier`, `RequestRedirect`
-(scheme + status) and `URLRewrite` (hostname + `replaceFullPath`) compile into per-frontend
-`ir::FrontendFilters`, which the translator maps onto Sōzu's frontend fields. Two honesty rules
-hold: Sōzu has no header *append* so a Gateway `add` is applied as a set; and unsupported sub-fields
-(redirect host/path/port, `replacePrefixMatch`, `RequestMirror`) are reported, never half-applied. A
-`RequestRedirect` rule has no `backendRef` (the API forbids it), so it becomes a **cluster-less
-frontend** — hence `ir::Frontend::cluster_id` is `Option<String>`.
+**Phase 3 — HTTPRoute filters.** `RequestHeaderModifier`/`ResponseHeaderModifier` and
+`RequestRedirect` (scheme + status) compile into per-frontend `ir::FrontendFilters`, which the
+translator maps onto Sōzu's frontend fields. Two honesty rules hold: Sōzu has no header *append* so
+a Gateway `add` is applied as a set; and unsupported sub-fields (redirect host/path/port,
+`RequestMirror`) are reported, never half-applied. A `RequestRedirect` rule has no `backendRef` (the
+API forbids it), so it becomes a **cluster-less frontend** — hence `ir::Frontend::cluster_id` is
+`Option<String>`. **`URLRewrite` is reported unsupported**: Sōzu's `rewrite_host`/`rewrite_path`
+rewrite the *backend authority* (the proxy dials the rewritten host) and expect regex-capture
+templates, so a literal Gateway rewrite 408s — verified end-to-end. The translator keeps an
+`ir::Rewrite` mapping, so re-wiring it is a one-line builder change if Sōzu's rewrite semantics are
+reconciled later.
 
 The CRDs are **optional**: the controller probes for them and runs Ingress-only if absent. Status
 (`Accepted`/`Programmed`/`ResolvedRefs`) is written by [`controller/src/status.rs`](crates/controller/src/status.rs),

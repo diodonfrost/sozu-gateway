@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # End-to-end test for the Gateway API: routing + the Phase 3 HTTPRoute filters
-# (header modifier, request redirect, URL rewrite). Applies the shipped examples
-# under examples/api-gateway/, so it also validates those manifests.
+# (header modifier, request redirect). Applies the shipped examples under
+# examples/api-gateway/, so it also validates those manifests.
+#
+# URLRewrite is intentionally not exercised: it is reported as unsupported
+# (Sōzu's rewrite_host rewrites the backend authority, not the forwarded Host).
 set -euo pipefail
 source "$(dirname "$0")/e2e-lib.sh"
 
@@ -30,15 +33,6 @@ echo "==> ResponseHeaderModifier: client sees the injected response header"
 grep -qi '^X-Served-By: sozu' /tmp/gw-h.out \
   && echo "  OK   response header X-Served-By: sozu" \
   || { echo "  FAIL X-Served-By missing from response"; exit 1; }
-
-echo "==> URLRewrite: host + full path rewritten before the backend"
-rw="$(curl -sS -H 'Host: rewrite.example.com' "$base/anything")"
-echo "$rw" | grep -qi '^Host: backend.internal' \
-  && echo "  OK   Host rewritten to backend.internal" \
-  || { echo "  FAIL Host not rewritten"; exit 1; }
-echo "$rw" | grep -q 'GET /v2 ' \
-  && echo "  OK   path rewritten to /v2" \
-  || { echo "  FAIL path not rewritten to /v2"; exit 1; }
 
 echo "==> RequestRedirect: HTTP -> HTTPS 301 (backend-less route)"
 curl -sS -o /dev/null -D /tmp/gw-r.out -H 'Host: old.example.com' "$base/"
