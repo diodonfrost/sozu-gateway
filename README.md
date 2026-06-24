@@ -1,237 +1,124 @@
-# Sōzu gateway for Clever Cloud
+<div align="center">
 
-[![Continuous integration](https://github.com/CleverCloud/sozu-gateway/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/CleverCloud/sozu-gateway/actions/workflows/ci.yml)
+<h1>sozu-gateway</h1>
 
-> Manages the [Sōzu](https://github.com/sozu-proxy/sozu) reverse proxy as a Kubernetes Ingress
-> controller and API gateway — hot-reconfigured over Sōzu's command socket, with no proxy restarts.
+<p><em>A Kubernetes Ingress controller &amp; API gateway built on the <a href="https://github.com/sozu-proxy/sozu">Sōzu</a> reverse proxy.</em></p>
 
-## How it works
+</div>
 
-The controller watches Kubernetes objects (`Ingress`, `IngressClass`, `Service`, `EndpointSlice`,
-`Secret`), compiles them into a neutral intermediate representation (IR), diffs that IR against the
-last-applied state, and pushes the **minimal** set of mutations to a co-located Sōzu instance over
-its protobuf **command socket**. Routes, backends and certificates are therefore applied **hot** —
-Sōzu is never restarted.
+<div align="center">
 
-Two properties are load-bearing:
+<a href="https://github.com/CleverCloud/sozu-gateway/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/CleverCloud/sozu-gateway/ci.yml?branch=master&style=for-the-badge&logo=github&label=CI"></a>
+<a href="LICENSE"><img src="https://img.shields.io/github/license/CleverCloud/sozu-gateway?style=for-the-badge&color=blue"></a>
+<a href="https://github.com/CleverCloud/sozu-gateway/releases"><img src="https://img.shields.io/github/v/release/CleverCloud/sozu-gateway?style=for-the-badge&logo=github&label=release"></a>
 
-- **Traffic goes to pod IPs, not the Service ClusterIP.** The controller resolves each Service to
-  its ready `EndpointSlice` endpoints, so Sōzu's own load balancing and health awareness stay
-  meaningful and routing survives pod churn.
-- **Reconciliation is idempotent.** A single global reconcile rebuilds the whole desired state from
-  the informer caches and applies only the delta, so re-running on an unchanged cluster emits
-  nothing.
+</div>
 
-Everything goes through the cluster's Kubernetes API and the local command socket — there is no
-external dependency and no API token.
+<br><br>
 
-## Status
+**sozu-gateway** manages the [Sōzu](https://github.com/sozu-proxy/sozu) reverse proxy as a Kubernetes
+Ingress controller and API gateway. It watches Kubernetes objects, compiles them into a neutral
+intermediate representation (IR), and pushes the **minimal** set of mutations to a co-located Sōzu
+instance over its command socket — so routes, backends and certificates are applied **hot, with no
+proxy restarts**.
 
-Phase 1 (Ingress + TLS), Phase 2 (Gateway API) and Phase 3 (HTTPRoute filters) are implemented and
-validated end-to-end on a live cluster — see [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md): HTTP/HTTPS
-traffic through Sōzu with SNI certificate selection, **zero-downtime hot reload** (266k requests,
-0 errors, while rolling-restarting, scaling and editing routes), Gateway API routing with
-`Accepted`/`Programmed`/`ResolvedRefs` status reporting, and HTTPRoute header/redirect
-filters. The project is usable but pre-1.0: APIs and defaults may change. Each release publishes the
-controller image and the Helm chart to ghcr.io.
+Two properties are load-bearing: traffic goes to **pod IPs** (resolved from `EndpointSlice`s, never
+the Service ClusterIP), and reconciliation is **idempotent** (a single global reconcile rebuilds the
+desired state and applies only the delta). Everything goes through the Kubernetes API and the local
+command socket — there is no external dependency and no API token.
 
-HTTP Basic auth and per-IP rate limiting exist in Sōzu but have no core Gateway API filter, so they
-remain unwired — see the [feature matrix](docs/features.md).
+---
 
 ## Features
 
-Supported today: **Ingress** and **Gateway API** (`GatewayClass`/`Gateway`/`HTTPRoute`/
-`ReferenceGrant` with `Accepted`/`Programmed`/`ResolvedRefs` status) routing through one shared IR;
-exact + wildcard hosts; `Prefix`/`Exact`/regex paths; TLS termination from Secrets with SNI and
-zero-gap rotation; pod-IP backends from EndpointSlices; HTTPRoute filters (header edits and
-redirects); and idempotent hot reload with no proxy restart. Basic auth and per-IP rate
-limiting exist in Sōzu but have no core Gateway API filter, so they are not wired yet.
+**Ingress** and **Gateway API** (`GatewayClass` / `Gateway` / `HTTPRoute` / `ReferenceGrant`, with
+`Accepted` / `Programmed` / `ResolvedRefs` status) routing through one shared IR; exact + wildcard
+hosts; `Prefix` / `Exact` / regex paths; TLS termination from Secrets with SNI and zero-gap rotation;
+pod-IP backends from `EndpointSlice`s; HTTPRoute filters (header edits and redirects); raw TCP / UDP
+(L4) forwarding; opt-in Prometheus `/metrics`; and idempotent hot reload with no proxy restart.
 
-See **[docs/features.md](docs/features.md)** for the full support matrix (supported / planned /
-not supported, with the Sōzu hard limits called out).
+> **Note:** Basic auth and per-IP rate limiting exist in Sōzu but have no core Gateway API filter, so
+> they are not wired yet. See the full support matrix — supported / planned / not supported, with
+> Sōzu's hard limits called out — in **[docs/features.md](docs/features.md)**.
 
-## Install
+---
 
-To deploy the gateway you need a running Kubernetes cluster, the `kubectl` command with
-cluster-admin access and `helm` v3.x. The step-by-step
-[installation guide](docs/getting-started/installation.md) covers verification, upgrades and
-uninstall.
+## Installation
 
-> **Note:** The HTTP/HTTPS listeners are declared statically in Sōzu's config and exposed through a
-> `Service type=LoadBalancer`. Make sure your cluster can provision a LoadBalancer (or override
-> `service.type`).
+[Helm](https://helm.sh) v3.x and a cluster that can provision a `Service type=LoadBalancer` are
+required. Each release publishes the chart to ghcr.io as an OCI artifact (and the matching controller
+image), so no image settings are needed:
 
-### From the published charts
-
-Each release publishes the [sozu-gateway](charts/sozu-gateway) chart to ghcr.io as an OCI artifact,
-versioned on the release tag without the `v` prefix (release `v0.1.0` → chart version `0.1.0`). No
-image settings are needed — the chart pulls the matching published image by default:
-
-```
-$ helm upgrade --install sozu-gateway \
-    oci://ghcr.io/clevercloud/sozu-gateway \
-    --version <version> --namespace sozu-system --create-namespace --wait
+```console
+helm upgrade --install sozu-gateway \
+  oci://ghcr.io/clevercloud/sozu-gateway \
+  --version <version> --namespace sozu-system --create-namespace --wait
 ```
 
-Then expose an application by creating an `Ingress` of class `sozu` — see the
-[examples/](examples/README.md) catalog:
+Then expose an application by creating an `Ingress` (or `HTTPRoute`) of class `sozu`:
 
-```
-$ kubectl apply -f examples/ingress/demo-app.yaml
-```
-
-### From source
-
-You need `git`, `rust` (stable), `docker`, `kubectl` and `helm`. First clone the repository:
-
-```
-$ git clone https://github.com/CleverCloud/sozu-gateway.git
-$ cd sozu-gateway
+```console
+kubectl apply -f examples/ingress/demo-app.yaml
 ```
 
-> **Note:** `protoc` is required to build — `sozu-command-lib`'s `build.rs` runs `prost-build`
-> (`apt-get install protobuf-compiler`).
+The step-by-step [installation guide](docs/getting-started/installation.md) covers verification,
+enabling the Gateway API, installing from source, upgrades and uninstall. Runnable manifests live in
+the [examples/](examples/README.md) catalog.
 
-#### Build the binary
-
-Tasks are run with [`just`](https://github.com/casey/just):
-
-```
-$ just build      # cargo build --workspace -> target/debug/sozu-gw-controller
-$ just test       # unit + golden/snapshot tests
-$ just lint       # cargo fmt --check + clippy -D warnings (the CI gate)
-```
-
-#### Build the docker image
-
-```
-$ just IMAGE=<your-registry>/sozu-gateway TAG=v0.1.0 image
-$ docker push <your-registry>/sozu-gateway:v0.1.0
-```
-
-#### From the helm chart
-
-The [sozu-gateway](charts/sozu-gateway) chart installs the controller + Sōzu (one Pod sharing the
-command socket), a `Service type=LoadBalancer`, the `IngressClass`, RBAC and Sōzu's `ConfigMap`.
-Point it at the image you pushed:
-
-```
-$ helm upgrade --install sozu-gateway charts/sozu-gateway \
-    --namespace sozu-system --create-namespace \
-    --set image.controller.repository=<your-registry>/sozu-gateway \
-    --set image.controller.tag=v0.1.0 \
-    --wait
-```
-
-To exercise the whole stack on the current kube-context — build, install, deploy a demo app and
-verify HTTP/HTTPS traffic — run `just e2e` (it uses the anonymous `ttl.sh` registry by default, so
-no credentials are needed).
-
-## Credentials
-
-None. The controller talks only to the in-cluster Kubernetes API (via its ServiceAccount) and to
-the local Sōzu command socket. No external API token is required, and Sōzu's image is pulled from a
-public registry.
+---
 
 ## Configuration
 
-### Global
+The controller is configured entirely through the Helm chart
+([values.yaml](charts/sozu-gateway/values.yaml)). The most useful values:
 
-The controller is configured through environment variables, all set by the Helm chart from its
-[values](charts/sozu-gateway/values.yaml):
+| Value | Default | Description |
+| ----- | ------- | ----------- |
+| `ingressClass.name` | `sozu` | Name of the created `IngressClass` (and `GatewayClass`) |
+| `ingressClass.default` | `false` | Make it the cluster's default `IngressClass` |
+| `service.type` | `LoadBalancer` | How the proxy is exposed |
+| `sozu.httpPort` / `httpsPort` | `8080` / `8443` | In-pod listener ports (the Service maps 80 / 443 to these) |
+| `rbac.allowStatusWrites` | `false` | Publish the gateway's LoadBalancer address into Ingress / Gateway `.status` |
+| `metrics.enabled` | `false` | Serve Prometheus `/metrics` (pulled from Sōzu over the socket) |
+| `l4.tcpServices` / `udpServices` | `{}` | Map `"<port>": "<ns>/<svc>:<port>"` for raw TCP / UDP forwarding |
 
-| Name                    | Kind      | Default               | Description                                                        |
-| ----------------------- | --------- | --------------------- | ------------------------------------------------------------------ |
-| `SOZU_GW_CLASS`         | `String`  | `sozu`                | The `IngressClass` name the controller owns                        |
-| `SOZU_GW_SOCKET`        | `String`  | `/run/sozu/sozu.sock` | Path to the Sōzu command socket (shared `emptyDir`)                |
-| `SOZU_GW_HTTP_LISTENER` | `Address` | `0.0.0.0:8080`        | HTTP listener address; **must match** Sōzu's `config.toml`         |
-| `SOZU_GW_HTTPS_LISTENER`| `Address` | `0.0.0.0:8443`        | HTTPS listener address; **must match** Sōzu's `config.toml`        |
-| `SOZU_GW_DEBOUNCE_MS`   | `Integer` | `500`                 | Coalesce bursts of watch events before reconciling                 |
-| `SOZU_GW_RESYNC_SECS`   | `Integer` | `60`                  | Periodic full resync interval (self-heals drift)                   |
-| `SOZU_GW_METRICS_LISTEN`| `Address` | _(unset)_             | Bind address for Prometheus `/metrics`; unset disables it          |
-| `RUST_LOG`              | `String`  | `info`                | Log filter, e.g. `info,sozu_gw_controller=debug`                   |
+A few behaviours worth knowing:
 
-The most useful Helm values (see [values.yaml](charts/sozu-gateway/values.yaml) for the full list):
+- **IngressClass** — only Ingresses selecting class `sozu` are reconciled (`spec.ingressClassName`, the legacy `kubernetes.io/ingress.class` annotation, or class-less when `ingressClass.default=true`).
+- **TLS** — `spec.tls[]` Secrets are served by SNI; a host goes HTTPS-on only once its certificate loads, and rotation is applied in place (`ReplaceCertificate`) with no gap.
+- **Metrics** — `metrics.enabled=true` pulls `QueryMetrics` over the socket on each scrape and renders Prometheus text on a dedicated `ClusterIP` Service (best-effort; a socket hiccup returns `503`).
+- **Data plane** — the controller and Sōzu run as two containers in one Pod sharing the command socket; HTTP / HTTPS listeners are declared statically in Sōzu's [`config.toml`](deploy/sozu/config.toml).
 
-| Value                          | Default                            | Description                                            |
-| ------------------------------ | ---------------------------------- | ------------------------------------------------------ |
-| `replicaCount`                 | `1`                                | Controller + Sōzu Pod replicas                         |
-| `ingressClass.name`            | `sozu`                             | Name of the created `IngressClass`                     |
-| `ingressClass.default`         | `false`                            | Make it the cluster's default `IngressClass`           |
-| `sozu.httpPort` / `httpsPort`  | `8080` / `8443`                    | In-pod listener ports (Service maps 80/443 to these)   |
-| `sozu.workerCount`             | `2`                                | Sōzu worker processes                                  |
-| `service.type`                 | `LoadBalancer`                     | How the proxy is exposed                               |
-| `rbac.allowStatusWrites`       | `false`                            | Grant `ingresses/status` + `events` (Phase 2)          |
-| `metrics.enabled`              | `false`                            | Serve Prometheus `/metrics` (pulled from Sōzu)         |
-| `metrics.port`                 | `9100`                             | Container + ClusterIP Service port for `/metrics`      |
-| `metrics.serviceMonitor.enabled` | `false`                          | Create a `ServiceMonitor` (needs the Prometheus Operator) |
+---
 
-### Metrics
+## Docs
 
-Sōzu has no built-in `/metrics` endpoint. With `metrics.enabled=true` the controller serves one:
-each Prometheus scrape issues a `QueryMetrics` over the Sōzu command socket and renders the
-returned aggregate (per-cluster/backend request counts, bytes, HTTP status classes, latency
-histograms) as Prometheus text. Metrics are best-effort and independent of routing — a socket hiccup
-returns `503`, never a panic. A dedicated `ClusterIP` Service (`<release>-metrics`, not the
-data-plane LoadBalancer) exposes the port; set `metrics.serviceMonitor.enabled=true` to also create
-a `ServiceMonitor` (use `metrics.serviceMonitor.additionalLabels` to match your Prometheus
-Operator's selector). Without the operator, scrape the Pod directly on `metrics.port`.
+- [Feature matrix](docs/features.md) — supported / planned / not supported, with Sōzu's hard limits.
+- [Installation guide](docs/getting-started/installation.md) — install, verify, Gateway API, source, upgrade, uninstall.
+- [End-to-end results](docs/E2E-RESULTS.md) — what was validated on a live cluster, and how to reproduce it.
+- [Examples](examples/README.md) — Ingress + Gateway API manifests (TLS, redirects, L4, header filters, …).
+- [PROTOCOL.md](PROTOCOL.md) — the verified Sōzu command-socket wire protocol.
 
-### IngressClass
+---
 
-The controller only reconciles Ingresses that select its class, by `spec.ingressClassName`, by the
-legacy `kubernetes.io/ingress.class` annotation, or — if `ingressClass.default=true` — Ingresses
-with no class set.
+## Contributing
 
-### TLS
+Issues and pull requests are welcome — open an [issue](https://github.com/CleverCloud/sozu-gateway/issues)
+for bugs or feature requests. Tasks run with [`just`](https://github.com/casey/just); before opening a
+PR, please make sure the CI gate is green (`protoc` is required to build — `sozu-command-lib`'s
+`build.rs` runs `prost-build`):
 
-For each `spec.tls[]` entry the controller loads the referenced `Secret` (`tls.crt` / `tls.key`)
-into Sōzu and serves it by SNI. A host becomes HTTPS-enabled only once its certificate has loaded
-successfully; a wildcard cert host (`*.example.com`) covers exactly one extra label. Certificate
-rotation is applied in place (`ReplaceCertificate`), with no TLS gap.
-
-### Exposing an application
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: web
-spec:
-  ingressClassName: sozu
-  tls:
-    - hosts: ["app.example.com"]
-      secretName: app-tls
-  rules:
-    - host: app.example.com
-      http:
-        paths:
-          - path: /
-            pathType: Prefix          # Prefix | Exact | ImplementationSpecific(=regex)
-            backend:
-              service:
-                name: web
-                port:
-                  number: 80
+```console
+just lint   # cargo fmt --check + clippy -D warnings
+just test   # unit + golden/snapshot tests
 ```
 
-### Data plane (Sōzu)
-
-The control plane (this controller) and the data plane (Sōzu) run as **two containers in one Pod**,
-sharing the command socket via an `emptyDir`, both as the same unprivileged uid. The HTTP/HTTPS
-listeners are declared statically in Sōzu's `config.toml`
-([deploy/sozu/config.toml](deploy/sozu/config.toml), rendered by the chart into a `ConfigMap`); the
-controller manages only clusters, frontends, backends and certificates over the socket.
+---
 
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
 
-The controller links `sozu-command-lib` (LGPL-3.0) only for the command-socket
-protocol types; the LGPL permits this from Apache-2.0 code. Sōzu itself (AGPL-3.0)
-runs as a separate process reached over a socket, so its license does not extend
-to this controller.
-
-## Getting in touch
-
-- Open an [issue](https://github.com/CleverCloud/sozu-gateway/issues) for bugs or feature requests.
+The controller links `sozu-command-lib` (LGPL-3.0) only for the command-socket protocol types, which
+the LGPL permits from Apache-2.0 code. Sōzu itself (AGPL-3.0) runs as a separate process reached over
+a socket, so its license does not extend to this controller.
