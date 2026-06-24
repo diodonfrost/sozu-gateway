@@ -1,29 +1,32 @@
-# HTTPRoute URLRewrite filter (Gateway API).
+# external-dns with the Gateway API.
 #
-# Rewrites the request line before it reaches the backend:
-#   hostname              -> the Host sent upstream
-#   path.replaceFullPath  -> replaces the whole path
-# (replacePrefixMatch is not supported yet and is reported as a Problem.)
+# external-dns's gateway-httproute source turns an HTTPRoute's hostnames into DNS
+# records pointing at the parent Gateway's `.status.addresses` — which this
+# controller fills from the gateway's LoadBalancer. So you need status write-back
+# enabled:
 #
-# Verify (whoami echoes Host + the path it received):
-#   curl -s -H 'Host: rewrite.example.com' http://<lb-ip>/anything \
-#     | grep -E 'Host|GET'      # Host: backend.internal ; GET /v2 ...
+#   helm upgrade ... --set rbac.allowStatusWrites=true
 #
-# Requires the Gateway API CRDs installed in the cluster.
+# and external-dns running with `--source=gateway-httproute`. Requires the
+# Gateway API CRDs.
+#
+# Verify the prerequisite (this controller's side):
+#   kubectl -n sozu-demo get gateway gw-edns -o jsonpath='{.status.addresses}'
+#   # -> [{"type":"IPAddress","value":"<lb-ip>"}]  (what external-dns reads)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: echo-rewrite
+  name: shop-gw
   namespace: sozu-demo
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: echo-rewrite
+      app: shop-gw
   template:
     metadata:
       labels:
-        app: echo-rewrite
+        app: shop-gw
     spec:
       containers:
         - name: whoami
@@ -39,11 +42,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: echo-rewrite
+  name: shop-gw
   namespace: sozu-demo
 spec:
   selector:
-    app: echo-rewrite
+    app: shop-gw
   ports:
     - name: http
       port: 80
@@ -59,7 +62,7 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
-  name: examples-gw
+  name: gw-edns
   namespace: sozu-demo
 spec:
   gatewayClassName: sozu
@@ -74,24 +77,17 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: rewrite
+  name: shop-gw
   namespace: sozu-demo
 spec:
   parentRefs:
-    - name: examples-gw
-  hostnames: ["rewrite.example.com"]
+    - name: gw-edns
+  hostnames: ["shop-gw.example.com"]
   rules:
     - matches:
         - path:
             type: PathPrefix
             value: /
-      filters:
-        - type: URLRewrite
-          urlRewrite:
-            hostname: backend.internal
-            path:
-              type: ReplaceFullPath
-              replaceFullPath: /v2
       backendRefs:
-        - name: echo-rewrite
+        - name: shop-gw
           port: 80

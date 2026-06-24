@@ -3,11 +3,6 @@
 # filters (header edits), and a redirect-only HTTPRoute (HTTP -> HTTPS). The TLS
 # Secret `app-tls` must exist in the gateway namespace (the e2e creates it from a
 # self-signed cert). Requires the Gateway API CRDs to be installed in the cluster.
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: sozu-demo
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:

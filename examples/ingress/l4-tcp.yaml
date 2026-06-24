@@ -13,11 +13,6 @@
 #
 # Verify (no HTTP — raw TCP):
 #   printf 'hello-l4\n' | nc <lb-ip> 9000      # echoes: hello-l4
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: sozu-demo
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:

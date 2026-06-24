@@ -3,7 +3,9 @@
 Manifests that exercise the Sōzu gateway on a real cluster. They assume the
 add-on is installed (`helm ... oci://ghcr.io/clevercloud/sozu-gateway`) and that
 an `IngressClass` / `GatewayClass` named `sozu` exists. All examples use the
-`sozu-demo` namespace.
+`sozu-demo` namespace — create it first with `kubectl create namespace sozu-demo`
+(the manifests no longer bundle the Namespace, so deleting one never tears down
+the shared namespace).
 
 - **[ingress/](ingress/)** — the Kubernetes **Ingress** API and Service
   annotations: TLS, automatic HTTP→HTTPS redirect, load-balancing algorithm &

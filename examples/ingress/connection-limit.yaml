@@ -9,11 +9,6 @@
 #   # 6 concurrent slow requests, cap = 2 -> some succeed (200), the rest 429
 #   for i in $(seq 6); do curl -s -o /dev/null -w '%{http_code}\n' \
 #     -H 'Host: limit.example.com' 'http://<lb-ip>/?wait=3s' & done; wait
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: sozu-demo
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -1,0 +1,78 @@
+# cert-manager with an Ingress (automatic TLS via the Ingress shim).
+#
+# Annotate the Ingress with an issuer and give `spec.tls` a `secretName`:
+# cert-manager provisions the certificate, solves the ACME HTTP-01 challenge, and
+# writes the result into that Secret — which this controller then loads and
+# serves (SNI). Requires cert-manager + a ClusterIssuer named `letsencrypt-prod`
+# (adjust to yours).
+#
+# HTTP-01 note: the automatic HTTP→HTTPS redirect does NOT break issuance. The
+# redirect only switches on once a cert is loaded for the host; during issuance
+# the Secret doesn't exist yet, so HTTP is served and cert-manager's challenge
+# Ingress (`/.well-known/acme-challenge/...`) is routed normally.
+#
+# Verify (after issuance):
+#   kubectl -n sozu-demo get secret shop-tls            # populated by cert-manager
+#   curl -k --resolve shop.example.com:443:<lb-ip> https://shop.example.com/
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop
+  namespace: sozu-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shop
+  template:
+    metadata:
+      labels:
+        app: shop
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10.2
+          args: ["--port=8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            tcpSocket:
+              port: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop
+  namespace: sozu-demo
+spec:
+  selector:
+    app: shop
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop
+  namespace: sozu-demo
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: sozu
+  tls:
+    - hosts: ["shop.example.com"]
+      secretName: shop-tls          # cert-manager creates and fills this
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: shop
+                port:
+                  number: 80

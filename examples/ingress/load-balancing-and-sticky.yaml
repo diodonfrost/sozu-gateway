@@ -11,11 +11,6 @@
 #   # with the cookie -> always the same pod
 #   curl -s -c jar -o /dev/null -H 'Host: lb.example.com' http://<lb-ip>/
 #   for i in $(seq 6); do curl -s -b jar -H 'Host: lb.example.com' http://<lb-ip>/ | grep Hostname; done
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: sozu-demo
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -1,0 +1,74 @@
+# external-dns with an Ingress.
+#
+# external-dns turns the Ingress's hostnames into DNS records pointing at the
+# address in the Ingress `.status.loadBalancer` — which this controller fills
+# from the gateway's LoadBalancer. So you need status write-back enabled:
+#
+#   helm upgrade ... --set rbac.allowStatusWrites=true
+#
+# and external-dns running with `--source=ingress`. Then the records appear
+# automatically; the annotations below only tune them (override host, set TTL).
+#
+# Verify the prerequisite (this controller's side):
+#   kubectl -n sozu-demo get ingress shop -o jsonpath='{.status.loadBalancer.ingress}'
+#   # -> [{"ip":"<lb-ip>"}]  (this is what external-dns reads)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop
+  namespace: sozu-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shop
+  template:
+    metadata:
+      labels:
+        app: shop
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10.2
+          args: ["--port=8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            tcpSocket:
+              port: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop
+  namespace: sozu-demo
+spec:
+  selector:
+    app: shop
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop
+  namespace: sozu-demo
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: shop.example.com
+    external-dns.alpha.kubernetes.io/ttl: "120"
+spec:
+  ingressClassName: sozu
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: shop
+                port:
+                  number: 80

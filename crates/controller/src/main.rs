@@ -285,34 +285,35 @@ async fn reconcile(
 
     // Report Gateway API status (best-effort; never fails the reconcile). It is
     // loop-safe: a no-op patch is skipped, so our own writes don't re-trigger.
+    // Resolve our own LoadBalancer Service once: its address is published into
+    // both Ingress `.status` and Gateway `.status.addresses` (what external-dns
+    // consumes). Best-effort + loop-safe (writes skipped when already current).
+    let publish_svc = args
+        .publish_service
+        .as_deref()
+        .and_then(|s| s.split_once('/'))
+        .and_then(|(ns, name)| {
+            inputs.services.iter().find(|s| {
+                s.metadata.namespace.as_deref() == Some(ns)
+                    && s.metadata.name.as_deref() == Some(name)
+            })
+        });
+    let gw_addresses = publish_svc
+        .map(status::gateway_addresses)
+        .unwrap_or_default();
+
     status::write_status(
         client,
         &args.controller_name,
         &out.gateway_classes,
         &out.gateways,
         &out.routes,
+        &gw_addresses,
     )
     .await;
 
-    // Publish the gateway's LoadBalancer address into each Ingress's status by
-    // reading our own Service from the cache. Best-effort + loop-safe (the write
-    // is skipped when already current, so it never re-triggers a real reconcile).
-    if let Some((ns, name)) = args
-        .publish_service
-        .as_deref()
-        .and_then(|s| s.split_once('/'))
-    {
-        let points = inputs
-            .services
-            .iter()
-            .find(|s| {
-                s.metadata.namespace.as_deref() == Some(ns)
-                    && s.metadata.name.as_deref() == Some(name)
-            })
-            .map(status::lb_points)
-            .unwrap_or_default();
-        status::write_ingress_status(client, &out.results, &points).await;
-    }
+    let lb_points = publish_svc.map(status::lb_points).unwrap_or_default();
+    status::write_ingress_status(client, &out.results, &lb_points).await;
 
     // Shadow advances only on a successful socket apply. On failure it stays at
     // the previous applied IR; because every emitted request is idempotent,

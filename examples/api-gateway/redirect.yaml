@@ -10,11 +10,6 @@
 #   # Location: https://old.example.com/
 #
 # Requires the Gateway API CRDs installed in the cluster.
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: sozu-demo
----
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:

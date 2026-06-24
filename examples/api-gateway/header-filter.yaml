@@ -9,11 +9,6 @@
 #   curl -sD- -H 'Host: headers.example.com' http://<lb-ip>/ | grep X-Served-By # X-Served-By: sozu
 #
 # Requires the Gateway API CRDs installed in the cluster.
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: sozu-demo
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:

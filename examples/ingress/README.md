@@ -1,9 +1,9 @@
 # Ingress examples
 
 Examples driven by the Kubernetes **Ingress** API (and Service annotations). They
-all use the `sozu-demo` namespace and the IngressClass `sozu`. Hosts are
-fictional — reach them with a `Host` header or `--resolve` against the gateway's
-LoadBalancer IP.
+all use the `sozu-demo` namespace (create it first: `kubectl create namespace
+sozu-demo`) and the IngressClass `sozu`. Hosts are fictional — reach them with a
+`Host` header or `--resolve` against the gateway's LoadBalancer IP.
 
 | File | Shows | How |
 | ---- | ----- | --- |
@@ -12,6 +12,8 @@ LoadBalancer IP.
 | [load-balancing-and-sticky.yaml](load-balancing-and-sticky.yaml) | LB algorithm + **sticky sessions** | Service annotations `sozu.io/load-balancing`, `sozu.io/sticky-sessions` |
 | [connection-limit.yaml](connection-limit.yaml) | **Per-source-IP connection limit** | Service annotations `sozu.io/max-connections-per-ip`, `sozu.io/retry-after` |
 | [l4-tcp.yaml](l4-tcp.yaml) | Raw **TCP (L4)** forwarding | Helm `l4.tcpServices` (see the file header) |
+| [external-dns.yaml](external-dns.yaml) | **external-dns** integration | DNS from the Ingress host + the controller-published `.status.loadBalancer` (`rbac.allowStatusWrites=true`) |
+| [cert-manager.yaml](cert-manager.yaml) | **cert-manager** automatic TLS | `cert-manager.io/cluster-issuer` annotation + `spec.tls.secretName` |
 
 The Service annotations above are cluster-level, so they apply just the same when
 the Service is reached through a Gateway API route.

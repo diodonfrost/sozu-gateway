@@ -13,11 +13,6 @@
 # Verify:
 #   curl -i -H 'Host: secure.example.com' http://<lb-ip>/        # 301 -> https://
 #   curl -k --resolve secure.example.com:443:<lb-ip> https://secure.example.com/   # 200
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: sozu-demo
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:

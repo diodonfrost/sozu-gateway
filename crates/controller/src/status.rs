@@ -18,6 +18,7 @@ use serde_json::json;
 use tracing::{debug, warn};
 
 use sozu_gw_builder::{GatewayClassResult, GatewayResult, IngressResult, RouteResult};
+use sozu_gw_gateway_api::gateway::GatewayStatusAddresses;
 use sozu_gw_gateway_api::httproute::{HttpRouteStatusParents, HttpRouteStatusParentsParentRef};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute};
 
@@ -37,6 +38,7 @@ pub async fn write_status(
     gateway_classes: &[GatewayClassResult],
     gateways: &[GatewayResult],
     routes: &[RouteResult],
+    gateway_addresses: &[GatewayStatusAddresses],
 ) {
     for gc in gateway_classes.iter().filter(|gc| gc.accepted) {
         if let Err(e) = write_gatewayclass(client, gc).await {
@@ -44,7 +46,7 @@ pub async fn write_status(
         }
     }
     for gw in gateways {
-        if let Err(e) = write_gateway(client, gw).await {
+        if let Err(e) = write_gateway(client, gw, gateway_addresses).await {
             warn!(namespace = %gw.namespace, name = %gw.name, error = %e, "failed to write Gateway status");
         }
     }
@@ -115,7 +117,11 @@ async fn write_gatewayclass(client: &Client, gc: &GatewayClassResult) -> Result<
     Ok(())
 }
 
-async fn write_gateway(client: &Client, gw: &GatewayResult) -> Result<(), kube::Error> {
+async fn write_gateway(
+    client: &Client,
+    gw: &GatewayResult,
+    addresses: &[GatewayStatusAddresses],
+) -> Result<(), kube::Error> {
     let api: Api<Gateway> = Api::namespaced(client.clone(), &gw.namespace);
     let current = api.get(&gw.name).await?;
     let cur = current
@@ -147,14 +153,50 @@ async fn write_gateway(client: &Client, gw: &GatewayResult) -> Result<(), kube::
         ],
         cur,
     );
-    if cur.is_some_and(|c| conditions_equal(&desired, c)) {
+    // Publish the LoadBalancer address into the Gateway's status (what
+    // external-dns's gateway-httproute source reads). Skipped when there is no
+    // address yet, so a pending LB never clears it.
+    let cur_addresses = current
+        .status
+        .as_ref()
+        .and_then(|s| s.addresses.as_deref())
+        .unwrap_or_default();
+    let addresses_unchanged = addresses.is_empty()
+        || serde_json::to_value(cur_addresses).ok() == serde_json::to_value(addresses).ok();
+    let conditions_unchanged = cur.is_some_and(|c| conditions_equal(&desired, c));
+    if conditions_unchanged && addresses_unchanged {
         return Ok(());
     }
-    let patch = json!({ "status": { "conditions": desired } });
+    let patch = if addresses.is_empty() {
+        json!({ "status": { "conditions": desired } })
+    } else {
+        json!({ "status": { "conditions": desired, "addresses": addresses } })
+    };
     api.patch_status(&gw.name, &PatchParams::default(), &Patch::Merge(&patch))
         .await?;
     debug!(namespace = %gw.namespace, name = %gw.name, "Gateway status updated");
     Ok(())
+}
+
+/// Map the publish Service's load-balancer address(es) to Gateway status
+/// addresses (`IPAddress` for an IP, `Hostname` otherwise).
+pub(crate) fn gateway_addresses(svc: &Service) -> Vec<GatewayStatusAddresses> {
+    lb_points(svc)
+        .into_iter()
+        .filter_map(|p| {
+            if let Some(ip) = p.ip {
+                Some(GatewayStatusAddresses {
+                    r#type: Some("IPAddress".to_string()),
+                    value: ip,
+                })
+            } else {
+                p.hostname.map(|h| GatewayStatusAddresses {
+                    r#type: Some("Hostname".to_string()),
+                    value: h,
+                })
+            }
+        })
+        .collect()
 }
 
 async fn write_route(
@@ -355,5 +397,25 @@ mod tests {
         }))
         .unwrap();
         assert!(lb_points(&svc).is_empty());
+    }
+
+    #[test]
+    fn gateway_addresses_typed_from_lb() {
+        let svc: Service = serde_json::from_value(json!({
+            "metadata": { "name": "gw", "namespace": "sozu-system" },
+            "status": { "loadBalancer": { "ingress": [
+                { "ip": "1.2.3.4" },
+                { "hostname": "lb.example.com" }
+            ] } }
+        }))
+        .unwrap();
+        let addrs = gateway_addresses(&svc);
+        assert_eq!(addrs.len(), 2);
+        assert!(addrs
+            .iter()
+            .any(|a| a.r#type.as_deref() == Some("IPAddress") && a.value == "1.2.3.4"));
+        assert!(addrs
+            .iter()
+            .any(|a| a.r#type.as_deref() == Some("Hostname") && a.value == "lb.example.com"));
     }
 }

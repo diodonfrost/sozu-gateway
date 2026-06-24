@@ -1,11 +1,6 @@
 # Demo app for the e2e: a 2-replica whoami behind a Service, exposed via an
 # Ingress of class "sozu" with TLS. The TLS Secret `app-tls` must exist in the
 # same namespace (the e2e target creates it from a self-signed cert).
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: sozu-demo
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
