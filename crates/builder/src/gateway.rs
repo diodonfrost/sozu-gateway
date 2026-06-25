@@ -54,6 +54,24 @@ pub struct GatewayResult {
     pub accepted: bool,
     pub programmed: bool,
     pub problems: Vec<Problem>,
+    /// Per-listener status (one entry per declared listener, in spec order).
+    pub listeners: Vec<ListenerStatus>,
+}
+
+/// Status of one listener, written to `Gateway.status.listeners[]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ListenerStatus {
+    pub name: String,
+    /// Route kinds this listener admits (e.g. `["HTTPRoute"]`); empty if none.
+    pub supported_kinds: Vec<String>,
+    /// Number of routes attached to this listener.
+    pub attached_routes: i32,
+    pub accepted: bool,
+    pub accepted_reason: &'static str,
+    pub programmed: bool,
+    pub programmed_reason: &'static str,
+    pub resolved_refs: bool,
+    pub resolved_refs_reason: &'static str,
 }
 
 /// Status of one `HTTPRoute` for a single parent Gateway.
@@ -94,6 +112,107 @@ struct ListenerInfo {
     port: i32,
     /// Which namespaces this listener admits routes from (`allowedRoutes.namespaces`).
     allow_from: AllowedFrom,
+    /// Can HTTPRoutes bind here at all (HTTP/HTTPS protocol)? Routes attach to a
+    /// routable listener for status/counting even when it is not `programmed`.
+    routable: bool,
+    /// Successfully programmed into Sōzu (HTTP, or HTTPS with a loaded cert).
+    /// Frontends are only emitted for programmed listeners.
+    programmed: bool,
+    programmed_reason: &'static str,
+    accepted: bool,
+    accepted_reason: &'static str,
+    resolved_refs: bool,
+    resolved_refs_reason: &'static str,
+    /// Route kinds this listener admits (`["HTTPRoute"]` or a filtered subset).
+    supported_kinds: Vec<String>,
+}
+
+/// Does an `allowedRoutes.kinds` entry name HTTPRoute (the only kind we serve)?
+fn is_httproute_kind(k: &sozu_gw_gateway_api::gateway::GatewayListenersAllowedRoutesKinds) -> bool {
+    k.group.as_deref().unwrap_or(GW_GROUP) == GW_GROUP && k.kind == "HTTPRoute"
+}
+
+/// The route kinds a listener admits, and whether every requested kind is
+/// supported. `allowedRoutes.kinds` unset → just HTTPRoute; a requested kind we
+/// don't serve → dropped from the set and flagged (→ `InvalidRouteKinds`).
+fn listener_supported_kinds(
+    l: &sozu_gw_gateway_api::gateway::GatewayListeners,
+) -> (Vec<String>, bool) {
+    match l.allowed_routes.as_ref().and_then(|ar| ar.kinds.as_ref()) {
+        Some(kinds) if !kinds.is_empty() => {
+            let supported = kinds.iter().any(is_httproute_kind);
+            let all_ok = kinds.iter().all(is_httproute_kind);
+            let set = if supported {
+                vec!["HTTPRoute".to_string()]
+            } else {
+                vec![]
+            };
+            (set, all_ok)
+        }
+        _ => (vec!["HTTPRoute".to_string()], true),
+    }
+}
+
+/// Build the status of one declared listener (whether or not we can program it).
+fn build_listener(
+    cfg: &BuildConfig,
+    inputs: &Inputs,
+    index: &Index,
+    gw_ns: &str,
+    l: &sozu_gw_gateway_api::gateway::GatewayListeners,
+    certificates: &mut Vec<ir::Certificate>,
+    problems: &mut Vec<Problem>,
+) -> ListenerInfo {
+    let routable = matches!(l.protocol.as_str(), "HTTP" | "HTTPS");
+    let mut info = ListenerInfo {
+        name: l.name.clone(),
+        hostname: l.hostname.clone(),
+        https: l.protocol == "HTTPS",
+        port: l.port,
+        allow_from: AllowedFrom::of(l),
+        routable,
+        programmed: false,
+        programmed_reason: "Programmed",
+        accepted: true,
+        accepted_reason: "Accepted",
+        resolved_refs: true,
+        resolved_refs_reason: "ResolvedRefs",
+        supported_kinds: vec![],
+    };
+
+    match l.protocol.as_str() {
+        "HTTP" => info.programmed = true,
+        "HTTPS" => {
+            if load_listener_certs(cfg, inputs, index, gw_ns, l, certificates, problems) {
+                info.programmed = true;
+            } else {
+                info.programmed = false;
+                info.programmed_reason = "Invalid";
+                info.resolved_refs = false;
+                info.resolved_refs_reason = "InvalidCertificateRef";
+            }
+        }
+        other => {
+            info.accepted = false;
+            info.accepted_reason = "UnsupportedProtocol";
+            info.programmed = false;
+            info.programmed_reason = "Invalid";
+            problems.push(Problem::UnsupportedProtocol {
+                protocol: other.to_string(),
+            });
+        }
+    }
+
+    if routable {
+        let (kinds, all_ok) = listener_supported_kinds(l);
+        info.supported_kinds = kinds;
+        if !all_ok {
+            info.resolved_refs = false;
+            info.resolved_refs_reason = "InvalidRouteKinds";
+        }
+    }
+
+    info
 }
 
 /// A listener's `allowedRoutes.namespaces.from` policy. `Selector` is treated as
@@ -162,37 +281,16 @@ pub(crate) fn build_gateway(
         }
         let (ns, name) = meta_nn(&gw.metadata.namespace, &gw.metadata.name);
         let mut problems = Vec::new();
-        let mut listeners = Vec::new();
+        // Every declared listener gets a status entry, even unsupported / cert-less
+        // ones (a route can still attach to them; they just aren't programmed).
+        let listeners: Vec<ListenerInfo> = gw
+            .spec
+            .listeners
+            .iter()
+            .map(|l| build_listener(cfg, inputs, index, &ns, l, certificates, &mut problems))
+            .collect();
 
-        for l in &gw.spec.listeners {
-            let allow_from = AllowedFrom::of(l);
-            match l.protocol.as_str() {
-                "HTTP" => listeners.push(ListenerInfo {
-                    name: l.name.clone(),
-                    hostname: l.hostname.clone(),
-                    https: false,
-                    port: l.port,
-                    allow_from,
-                }),
-                "HTTPS" => {
-                    if load_listener_certs(cfg, inputs, index, &ns, l, certificates, &mut problems)
-                    {
-                        listeners.push(ListenerInfo {
-                            name: l.name.clone(),
-                            hostname: l.hostname.clone(),
-                            https: true,
-                            port: l.port,
-                            allow_from,
-                        });
-                    }
-                }
-                other => problems.push(Problem::UnsupportedProtocol {
-                    protocol: other.to_string(),
-                }),
-            }
-        }
-
-        let programmed = !listeners.is_empty();
+        let programmed = listeners.iter().any(|l| l.programmed);
         gw_listeners.insert((ns.clone(), name.clone()), listeners);
         gateways.push(GatewayResult {
             namespace: ns,
@@ -200,11 +298,15 @@ pub(crate) fn build_gateway(
             accepted: true,
             programmed,
             problems,
+            // Filled after route attachment, once attachedRoutes is known.
+            listeners: Vec::new(),
         });
     }
 
-    // 3. HTTPRoutes attached to our Gateways.
+    // 3. HTTPRoutes attached to our Gateways. `attached` counts, per listener,
+    // the routes bound to it (`Gateway.status.listeners[].attachedRoutes`).
     let mut routes = Vec::new();
+    let mut attached: BTreeMap<(String, String, String), i32> = BTreeMap::new();
     for route in &inputs.http_routes {
         let (rns, rname) = meta_nn(&route.metadata.namespace, &route.metadata.name);
         let mut parents = Vec::new();
@@ -223,6 +325,7 @@ pub(crate) fn build_gateway(
             // narrowed to those that admit the route's namespace.
             let addressable: Vec<&ListenerInfo> = listeners
                 .iter()
+                .filter(|l| l.routable)
                 .filter(|l| pref.section_name.as_ref().is_none_or(|sn| sn == &l.name))
                 .filter(|l| pref.port.is_none_or(|p| p == l.port))
                 .collect();
@@ -262,6 +365,16 @@ pub(crate) fn build_gateway(
                 (true, "Accepted")
             };
 
+            // An accepted route binds to each candidate listener (programmed or
+            // not) — count it toward that listener's attachedRoutes.
+            if accepted {
+                for c in &candidates {
+                    *attached
+                        .entry((gw_ns.clone(), pref.name.clone(), c.name.clone()))
+                        .or_insert(0) += 1;
+                }
+            }
+
             parents.push(RouteParentResult {
                 gateway_namespace: gw_ns,
                 gateway_name: pref.name.clone(),
@@ -280,6 +393,30 @@ pub(crate) fn build_gateway(
                 parents,
             });
         }
+    }
+
+    // Assemble per-listener status now that attachedRoutes is known.
+    for g in &mut gateways {
+        let Some(listeners) = gw_listeners.get(&(g.namespace.clone(), g.name.clone())) else {
+            continue;
+        };
+        g.listeners = listeners
+            .iter()
+            .map(|l| ListenerStatus {
+                name: l.name.clone(),
+                supported_kinds: l.supported_kinds.clone(),
+                attached_routes: attached
+                    .get(&(g.namespace.clone(), g.name.clone(), l.name.clone()))
+                    .copied()
+                    .unwrap_or(0),
+                accepted: l.accepted,
+                accepted_reason: l.accepted_reason,
+                programmed: l.programmed,
+                programmed_reason: l.programmed_reason,
+                resolved_refs: l.resolved_refs,
+                resolved_refs_reason: l.resolved_refs_reason,
+            })
+            .collect();
     }
 
     GatewayBuildResults {
@@ -500,6 +637,11 @@ fn attach_rule(
 
     for (path, method) in &route_matches {
         for l in candidates {
+            // A bound-but-unprogrammed listener (e.g. a cert-less HTTPS listener)
+            // counts toward attachedRoutes but carries no frontend.
+            if !l.programmed {
+                continue;
+            }
             let hosts = effective_hostnames(route_hostnames, l.hostname.as_deref());
             if hosts.is_empty() {
                 // The route's hostnames don't intersect this listener's hostname:

@@ -522,3 +522,67 @@ fn cross_namespace_route_to_all_listener_is_accepted() {
     assert!(p.accepted);
     assert_eq!(p.accepted_reason, "Accepted");
 }
+
+#[test]
+fn gateway_listener_status_counts_attached_routes() {
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "http", "protocol": "HTTP", "port": 80 },
+            { "name": "http-unattached", "protocol": "HTTP", "port": 80 }
+        ]}
+    }));
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw", "sectionName": "http" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        http_routes: vec![route],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    let g = &out.gateways[0];
+    assert_eq!(g.listeners.len(), 2, "status for every declared listener");
+    let http = g.listeners.iter().find(|l| l.name == "http").unwrap();
+    assert_eq!(http.attached_routes, 1);
+    assert_eq!(http.supported_kinds, vec!["HTTPRoute".to_string()]);
+    assert!(http.accepted && http.programmed && http.resolved_refs);
+    let unattached = g
+        .listeners
+        .iter()
+        .find(|l| l.name == "http-unattached")
+        .unwrap();
+    assert_eq!(unattached.attached_routes, 0);
+}
+
+#[test]
+fn gateway_listener_invalid_route_kind() {
+    // allowedRoutes.kinds requests a kind we don't serve -> supportedKinds empty,
+    // ResolvedRefs=False / InvalidRouteKinds.
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "http", "protocol": "HTTP", "port": 80,
+              "allowedRoutes": { "kinds": [{ "kind": "TCPRoute" }] } }
+        ]}
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    let l = &out.gateways[0].listeners[0];
+    assert!(l.supported_kinds.is_empty());
+    assert!(!l.resolved_refs);
+    assert_eq!(l.resolved_refs_reason, "InvalidRouteKinds");
+    assert_eq!(l.attached_routes, 0);
+}

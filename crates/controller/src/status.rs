@@ -18,7 +18,9 @@ use serde_json::json;
 use tracing::{debug, warn};
 
 use sozu_gw_builder::{GatewayClassResult, GatewayResult, IngressResult, RouteResult};
-use sozu_gw_gateway_api::gateway::GatewayStatusAddresses;
+use sozu_gw_gateway_api::gateway::{
+    GatewayStatusAddresses, GatewayStatusListeners, GatewayStatusListenersSupportedKinds,
+};
 use sozu_gw_gateway_api::httproute::{HttpRouteStatusParents, HttpRouteStatusParentsParentRef};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute};
 
@@ -128,6 +130,66 @@ async fn write_gatewayclass(client: &Client, gc: &GatewayClassResult) -> Result<
     Ok(())
 }
 
+/// Build `Gateway.status.listeners[]`, reusing each listener condition's previous
+/// `lastTransitionTime` (matched by listener name) so repeated writes are stable.
+fn build_listeners_status(
+    gw: &GatewayResult,
+    current: &Gateway,
+    generation: Option<i64>,
+) -> Vec<GatewayStatusListeners> {
+    let cur_listeners = current
+        .status
+        .as_ref()
+        .and_then(|s| s.listeners.as_deref())
+        .unwrap_or_default();
+    gw.listeners
+        .iter()
+        .map(|l| {
+            let prev = cur_listeners
+                .iter()
+                .find(|cl| cl.name == l.name)
+                .map(|cl| cl.conditions.as_slice());
+            let conditions = build_conditions(
+                &[
+                    Desired {
+                        type_: "Accepted",
+                        status: l.accepted,
+                        reason: l.accepted_reason,
+                        message: "Listener accepted by sozu-gateway".to_string(),
+                    },
+                    Desired {
+                        type_: "Programmed",
+                        status: l.programmed,
+                        reason: l.programmed_reason,
+                        message: "Listener programmed into Sōzu".to_string(),
+                    },
+                    Desired {
+                        type_: "ResolvedRefs",
+                        status: l.resolved_refs,
+                        reason: l.resolved_refs_reason,
+                        message: "Listener references resolved".to_string(),
+                    },
+                ],
+                prev,
+                generation,
+            );
+            GatewayStatusListeners {
+                name: l.name.clone(),
+                supported_kinds: l
+                    .supported_kinds
+                    .iter()
+                    .map(|k| GatewayStatusListenersSupportedKinds {
+                        group: Some(GW_GROUP.to_string()),
+                        kind: k.clone(),
+                    })
+                    .collect(),
+                attached_routes: l.attached_routes,
+                conditions,
+            }
+        })
+        .collect()
+}
+
 async fn write_gateway(
     client: &Client,
     gw: &GatewayResult,
@@ -165,6 +227,7 @@ async fn write_gateway(
         cur,
         current.metadata.generation,
     );
+    let listeners = build_listeners_status(gw, &current, current.metadata.generation);
     // Publish the LoadBalancer address into the Gateway's status (what
     // external-dns's gateway-httproute source reads). Skipped when there is no
     // address yet, so a pending LB never clears it.
@@ -173,17 +236,26 @@ async fn write_gateway(
         .as_ref()
         .and_then(|s| s.addresses.as_deref())
         .unwrap_or_default();
+    let cur_listeners = current
+        .status
+        .as_ref()
+        .and_then(|s| s.listeners.as_deref())
+        .unwrap_or_default();
     let addresses_unchanged = addresses.is_empty()
         || serde_json::to_value(cur_addresses).ok() == serde_json::to_value(addresses).ok();
+    let listeners_unchanged =
+        serde_json::to_value(cur_listeners).ok() == serde_json::to_value(&listeners).ok();
     let conditions_unchanged = cur.is_some_and(|c| conditions_equal(&desired, c));
-    if conditions_unchanged && addresses_unchanged {
+    if conditions_unchanged && addresses_unchanged && listeners_unchanged {
         return Ok(());
     }
-    let patch = if addresses.is_empty() {
-        json!({ "status": { "conditions": desired } })
-    } else {
-        json!({ "status": { "conditions": desired, "addresses": addresses } })
-    };
+    let mut status = serde_json::Map::new();
+    status.insert("conditions".to_string(), json!(desired));
+    status.insert("listeners".to_string(), json!(listeners));
+    if !addresses.is_empty() {
+        status.insert("addresses".to_string(), json!(addresses));
+    }
+    let patch = json!({ "status": status });
     api.patch_status(&gw.name, &PatchParams::default(), &Patch::Merge(&patch))
         .await?;
     debug!(namespace = %gw.namespace, name = %gw.name, "Gateway status updated");

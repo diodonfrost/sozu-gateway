@@ -18,7 +18,9 @@ use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant};
 use sozu_gw_ir as ir;
 
 mod gateway;
-pub use gateway::{GatewayClassResult, GatewayResult, RouteParentResult, RouteResult};
+pub use gateway::{
+    GatewayClassResult, GatewayResult, ListenerStatus, RouteParentResult, RouteResult,
+};
 
 const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 const LEGACY_CLASS_ANNOTATION: &str = "kubernetes.io/ingress.class";
