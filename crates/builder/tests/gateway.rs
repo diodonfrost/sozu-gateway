@@ -472,3 +472,53 @@ fn cross_namespace_backend_without_grant_is_ref_not_permitted() {
     assert!(!p.resolved_refs);
     assert_eq!(p.resolved_refs_reason, "RefNotPermitted");
 }
+
+#[test]
+fn cross_namespace_route_to_same_listener_is_not_allowed() {
+    // http_gateway() (ns "demo") has no allowedRoutes -> default `Same`. A route in
+    // another namespace must NOT bind: Accepted=False / NotAllowedByListeners.
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "other" },
+        "spec": {
+            "parentRefs": [{ "name": "gw", "namespace": "demo" }],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+        }
+    }));
+    let out = build(&BuildConfig::default(), &inputs_with(route));
+    let p = &out.routes[0].parents[0];
+    assert!(!p.accepted);
+    assert_eq!(p.accepted_reason, "NotAllowedByListeners");
+    assert!(out.ir.frontends.is_empty());
+}
+
+#[test]
+fn cross_namespace_route_to_all_listener_is_accepted() {
+    // A listener with `allowedRoutes.namespaces.from: All` admits routes from any
+    // namespace (the backend ref is unrelated to this assertion).
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "http", "protocol": "HTTP", "port": 80,
+              "allowedRoutes": { "namespaces": { "from": "All" } } }
+        ]}
+    }));
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "other" },
+        "spec": {
+            "parentRefs": [{ "name": "gw", "namespace": "demo" }],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        http_routes: vec![route],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    let p = &out.routes[0].parents[0];
+    assert!(p.accepted);
+    assert_eq!(p.accepted_reason, "Accepted");
+}

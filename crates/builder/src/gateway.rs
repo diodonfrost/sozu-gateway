@@ -24,7 +24,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
-use sozu_gw_gateway_api::gateway::GatewayListenersTlsMode;
+use sozu_gw_gateway_api::gateway::{
+    GatewayListenersAllowedRoutesNamespacesFrom as ApiAllowedFrom, GatewayListenersTlsMode,
+};
 use sozu_gw_gateway_api::httproute::{
     HttpRouteRulesFilters, HttpRouteRulesFiltersRequestRedirectScheme, HttpRouteRulesFiltersType,
     HttpRouteRulesMatchesMethod, HttpRouteRulesMatchesPath, HttpRouteRulesMatchesPathType,
@@ -90,6 +92,41 @@ struct ListenerInfo {
     https: bool,
     /// The listener's declared port, matched against a parentRef's optional port.
     port: i32,
+    /// Which namespaces this listener admits routes from (`allowedRoutes.namespaces`).
+    allow_from: AllowedFrom,
+}
+
+/// A listener's `allowedRoutes.namespaces.from` policy. `Selector` is treated as
+/// permissive: we have no Namespace label index to evaluate it, so we do not
+/// reject on it (the conformance rejection case uses the default `Same`).
+#[derive(Clone, Copy)]
+enum AllowedFrom {
+    Same,
+    All,
+    Selector,
+}
+
+impl AllowedFrom {
+    fn of(l: &sozu_gw_gateway_api::gateway::GatewayListeners) -> Self {
+        match l
+            .allowed_routes
+            .as_ref()
+            .and_then(|ar| ar.namespaces.as_ref())
+            .and_then(|ns| ns.from.as_ref())
+        {
+            Some(ApiAllowedFrom::All) => AllowedFrom::All,
+            Some(ApiAllowedFrom::Selector) => AllowedFrom::Selector,
+            _ => AllowedFrom::Same, // unset defaults to Same
+        }
+    }
+
+    /// Does this listener admit a route from `route_ns` (gateway in `gw_ns`)?
+    fn admits(self, route_ns: &str, gw_ns: &str) -> bool {
+        match self {
+            AllowedFrom::All | AllowedFrom::Selector => true,
+            AllowedFrom::Same => route_ns == gw_ns,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -128,12 +165,14 @@ pub(crate) fn build_gateway(
         let mut listeners = Vec::new();
 
         for l in &gw.spec.listeners {
+            let allow_from = AllowedFrom::of(l);
             match l.protocol.as_str() {
                 "HTTP" => listeners.push(ListenerInfo {
                     name: l.name.clone(),
                     hostname: l.hostname.clone(),
                     https: false,
                     port: l.port,
+                    allow_from,
                 }),
                 "HTTPS" => {
                     if load_listener_certs(cfg, inputs, index, &ns, l, certificates, &mut problems)
@@ -143,6 +182,7 @@ pub(crate) fn build_gateway(
                             hostname: l.hostname.clone(),
                             https: true,
                             port: l.port,
+                            allow_from,
                         });
                     }
                 }
@@ -179,19 +219,28 @@ pub(crate) fn build_gateway(
             let Some(listeners) = gw_listeners.get(&(gw_ns.clone(), pref.name.clone())) else {
                 continue; // not one of our Gateways
             };
-            let candidates: Vec<&ListenerInfo> = listeners
+            // Listeners the parentRef addresses (by sectionName + port), then
+            // narrowed to those that admit the route's namespace.
+            let addressable: Vec<&ListenerInfo> = listeners
                 .iter()
                 .filter(|l| pref.section_name.as_ref().is_none_or(|sn| sn == &l.name))
                 .filter(|l| pref.port.is_none_or(|p| p == l.port))
+                .collect();
+            let candidates: Vec<&ListenerInfo> = addressable
+                .iter()
+                .copied()
+                .filter(|l| l.allow_from.admits(&rns, &gw_ns))
                 .collect();
 
             let mut problems = Vec::new();
             let mut resolved_refs = true;
             let mut resolved_refs_reason = "ResolvedRefs";
-            // A parentRef whose sectionName/port matches no listener does not bind
-            // to this Gateway: Accepted=False / NoMatchingParent.
-            let (accepted, accepted_reason) = if candidates.is_empty() {
+            // No addressable listener -> NoMatchingParent; addressable but none
+            // admits this namespace -> NotAllowedByListeners.
+            let (accepted, accepted_reason) = if addressable.is_empty() {
                 (false, "NoMatchingParent")
+            } else if candidates.is_empty() {
+                (false, "NotAllowedByListeners")
             } else {
                 for rule in route.spec.rules.iter().flatten() {
                     attach_rule(
