@@ -473,7 +473,7 @@ fn load_listener_certs(
             .unwrap_or_else(|| gateway_ns.to_string());
         if secret_ns != gateway_ns
             && !reference_granted(
-                inputs, &secret_ns, "Secret", &cref.name, gateway_ns, "Gateway",
+                inputs, &secret_ns, "", "Secret", &cref.name, gateway_ns, GW_GROUP, "Gateway",
             )
         {
             problems.push(Problem::BackendRefNotPermitted {
@@ -580,9 +580,11 @@ fn attach_rule(
             && !reference_granted(
                 inputs,
                 &backend_ns,
+                "",
                 "Service",
                 &br.name,
                 route_ns,
+                GW_GROUP,
                 "HTTPRoute",
             )
         {
@@ -838,12 +840,15 @@ fn effective_hostnames(route: Option<&[String]>, listener: Option<&str>) -> Vec<
 
 /// Is a cross-namespace reference allowed by a `ReferenceGrant` in the target
 /// namespace?
+#[allow(clippy::too_many_arguments)]
 fn reference_granted(
     inputs: &Inputs,
     to_ns: &str,
+    to_group: &str,
     to_kind: &str,
     to_name: &str,
     from_ns: &str,
+    from_group: &str,
     from_kind: &str,
 ) -> bool {
     inputs.reference_grants.iter().any(|grant| {
@@ -853,11 +858,11 @@ fn reference_granted(
                 .spec
                 .from
                 .iter()
-                .any(|f| f.kind == from_kind && f.namespace == from_ns)
-            && grant
-                .spec
-                .to
-                .iter()
-                .any(|t| t.kind == to_kind && t.name.as_deref().is_none_or(|n| n == to_name))
+                .any(|f| f.group == from_group && f.kind == from_kind && f.namespace == from_ns)
+            && grant.spec.to.iter().any(|t| {
+                t.group == to_group
+                    && t.kind == to_kind
+                    && t.name.as_deref().is_none_or(|n| n == to_name)
+            })
     })
 }

@@ -611,3 +611,33 @@ fn cross_namespace_cert_without_grant_is_ref_not_permitted() {
     assert!(!l.resolved_refs);
     assert_eq!(l.resolved_refs_reason, "RefNotPermitted");
 }
+
+#[test]
+fn cert_grant_with_wrong_from_group_is_not_permitted() {
+    // A ReferenceGrant in the right namespace but with a non-matching `from.group`
+    // must NOT permit the ref (group is part of the match).
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [{
+            "name": "https", "protocol": "HTTPS", "port": 443, "hostname": "app.example.com",
+            "tls": { "mode": "Terminate",
+                     "certificateRefs": [{ "name": "app-tls", "namespace": "certs" }] }
+        }]}
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        reference_grants: vec![from_json(json!({
+            "metadata": { "name": "g", "namespace": "certs" },
+            "spec": {
+                "from": [{ "group": "wrong.group", "kind": "Gateway", "namespace": "demo" }],
+                "to": [{ "group": "", "kind": "Secret" }]
+            }
+        }))],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    let l = &out.gateways[0].listeners[0];
+    assert!(!l.resolved_refs);
+    assert_eq!(l.resolved_refs_reason, "RefNotPermitted");
+}
