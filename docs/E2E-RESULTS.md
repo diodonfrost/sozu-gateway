@@ -110,31 +110,37 @@ run against a live cluster (`GatewayClass=sozu`, `rbac.allowStatusWrites=true`).
 
 | | Passed | Failed | Result |
 |---|---|---|---|
-| Core | **7** | 26 | failure |
+| Core | **9** | 24 | failure |
 | Extended (declared: `HTTPRouteResponseHeaderModification`, `HTTPRouteSchemeRedirect`, `HTTPRouteMethodMatching`) | 0 | 3 | failure |
 
-The profile is **not passing** — we are **not (yet) conformant**. This is a baseline to improve
-against; running the suite surfaced and fixed two real bugs (`observedGeneration` on status
-conditions; a reconcile wedge when Sōzu rejects a non-idempotent `Remove*`) and unblocked
-hostname-less routing (catch-all `*`), taking core from 3 → 7 passing.
+The profile is **not passing** — and with Sōzu it **cannot** be (see hard limits below), so the goal
+is a well-documented **partial** result, not the "Conformant" badge. Running the suite surfaced and
+fixed real bugs (`observedGeneration` on status conditions; a reconcile wedge when Sōzu rejects a
+non-idempotent `Remove*`), unblocked hostname-less routing (catch-all `*`), and added invalid-route
+status reasons + `allowedRoutes.namespaces` — taking core from **3 → 9**.
 
-**Passing:** `GatewayClass/Gateway/HTTPRouteObservedGenerationBump`, `HTTPRouteSimpleSameNamespace`,
-`HTTPRouteExactPathMatching`, `HTTPRouteCrossNamespace`, `HTTPRouteServiceTypes`.
+**Passing (9):** `GatewayClass/Gateway/HTTPRouteObservedGenerationBump`, `HTTPRouteSimpleSameNamespace`,
+`HTTPRouteExactPathMatching`, `HTTPRouteCrossNamespace`, `HTTPRouteServiceTypes`,
+`HTTPRouteInvalidParentRefNotMatchingSectionName`, `HTTPRouteInvalidCrossNamespaceParentRef`.
 
-> The table above is the recorded baseline run; status-reason work landed after it (see gap 1).
+**Hard ceiling — not fixable with Sōzu / one LoadBalancer** (these stay failed):
+- **No HTTP 500.** Sōzu's answers are 301/400/401/404/408/413/421/429/502/503/504/507; an invalid
+  `backendRef` yields 503, but the spec/tests want exactly 500 → `HTTPRouteInvalid{NonExistent,
+  UnknownKind,CrossNamespace}BackendRef`, `HTTPRouteInvalidReferenceGrant`, `…PartiallyInvalid…`.
+- **No weighted split** (`HTTPRouteWeight`) and **no header/query-value matching**
+  (`HTTPRouteHeaderMatching`, parts of `HTTPRouteMatching`).
+- **Catch-all collisions.** Clever Cloud's cluster currently allows **one LoadBalancer**, so all
+  Gateways share one Sōzu `:80`/`:443`; two hostname-less routes on the same path collide on key
+  `(:8080,*,/path)` (first wins). Per-Gateway addresses would need multiple LBs (unavailable), so
+  this is a platform-constrained limit. Real users on a shared LB route by hostname (no collision).
 
-**Top remaining gaps** (priority order):
-1. **Invalid-route rejection** — *partly addressed*: HTTPRoute parents now report the spec status
-   reasons (`NoMatchingParent`, `InvalidKind`, `BackendNotFound`, `RefNotPermitted`), flipping
-   `HTTPRouteInvalidParentRefNotMatchingSectionName`. Still failing: the invalid-`backendRef` tests
-   also require the route to return **HTTP 500** on traffic (we 404), and
-   `InvalidCrossNamespaceParentRef` needs `allowedRoutes.namespaces` enforcement.
-2. **Header `set` semantics** — Gateway `set` must *replace* a header, but Sōzu *appends* (observed
-   `original,header-set`); the request/response header-modifier mapping needs revisiting.
-3. **Catch-all collisions** — all Gateways map to the static `:80`, so two hostname-less routes on
-   the same path share Sōzu key `(:8080,*,/path)`; `unique_frontends` keeps the first → the rest 404.
-4. **Header/query matching, hostname intersection, multiple-match precedence, `ReferenceGrant`
-   enforcement, per-Gateway HTTPS listeners.**
+**Implementable remaining gaps** (would raise the count):
+1. **Gateway listener status** — `.status.listeners[]` (conditions, `supportedKinds`, `attachedRoutes`):
+   unblocks `GatewayWithAttachedRoutes`, `GatewayModifyListeners`, `GatewayInvalidRouteKind/TLSConfiguration`,
+   `GatewaySecret*ReferenceGrant*` (~8, purely additive — best ROI).
+2. **Header `set` vs append** — Gateway `set` must *replace*; Sōzu *appends* (observed
+   `original,header-set`). Fixable only if Sōzu can replace a header; else a hard limit.
+3. Hostname intersection / path-match order / per-Gateway HTTPS listener.
 
 Reproduce: see the harness + commands in `CONFORMANCE-HANDOFF.md`.
 
