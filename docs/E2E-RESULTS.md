@@ -110,37 +110,42 @@ run against a live cluster (`GatewayClass=sozu`, `rbac.allowStatusWrites=true`).
 
 | | Passed | Failed | Result |
 |---|---|---|---|
-| Core | **9** | 24 | failure |
+| Core | **15** | 18 | failure |
 | Extended (declared: `HTTPRouteResponseHeaderModification`, `HTTPRouteSchemeRedirect`, `HTTPRouteMethodMatching`) | 0 | 3 | failure |
 
 The profile is **not passing** — and with Sōzu it **cannot** be (see hard limits below), so the goal
 is a well-documented **partial** result, not the "Conformant" badge. Running the suite surfaced and
-fixed real bugs (`observedGeneration` on status conditions; a reconcile wedge when Sōzu rejects a
-non-idempotent `Remove*`), unblocked hostname-less routing (catch-all `*`), and added invalid-route
-status reasons + `allowedRoutes.namespaces` — taking core from **3 → 9**.
+fixed real bugs (`observedGeneration`; a reconcile wedge on non-idempotent `Remove*`), unblocked
+hostname-less routing (catch-all `*`), added invalid-route status reasons + `allowedRoutes.namespaces`,
+and implemented per-listener status (`.status.listeners[]`) — taking core from **3 → 15**.
 
-**Passing (9):** `GatewayClass/Gateway/HTTPRouteObservedGenerationBump`, `HTTPRouteSimpleSameNamespace`,
-`HTTPRouteExactPathMatching`, `HTTPRouteCrossNamespace`, `HTTPRouteServiceTypes`,
-`HTTPRouteInvalidParentRefNotMatchingSectionName`, `HTTPRouteInvalidCrossNamespaceParentRef`.
+**Passing (15):** the 3 `*ObservedGenerationBump`; `HTTPRouteSimpleSameNamespace`,
+`HTTPRouteExactPathMatching`, `HTTPRouteCrossNamespace`, `HTTPRouteServiceTypes`;
+`HTTPRouteInvalidParentRefNotMatchingSectionName`, `HTTPRouteInvalidCrossNamespaceParentRef`;
+`GatewayWithAttachedRoutes`, `GatewayModifyListeners`, `GatewayInvalidRouteKind`,
+`GatewayInvalidTLSConfiguration`, `GatewaySecretReferenceGrant{AllInNamespace,Specific}`.
+(`GatewayWithAttachedRoutesWithPort8080` also passes in isolation; it flaked here under client
+throttling — run the suite with a raised client QPS, see `CONFORMANCE-HANDOFF.md`.)
 
 **Hard ceiling — not fixable with Sōzu / one LoadBalancer** (these stay failed):
 - **No HTTP 500.** Sōzu's answers are 301/400/401/404/408/413/421/429/502/503/504/507; an invalid
-  `backendRef` yields 503, but the spec/tests want exactly 500 → `HTTPRouteInvalid{NonExistent,
-  UnknownKind,CrossNamespace}BackendRef`, `HTTPRouteInvalidReferenceGrant`, `…PartiallyInvalid…`.
+  `backendRef` yields 503, but the spec/tests want exactly 500 → the `HTTPRouteInvalid*BackendRef` /
+  `*ReferenceGrant` / `…PartiallyInvalid…` traffic checks.
 - **No weighted split** (`HTTPRouteWeight`) and **no header/query-value matching**
   (`HTTPRouteHeaderMatching`, parts of `HTTPRouteMatching`).
 - **Catch-all collisions.** Clever Cloud's cluster currently allows **one LoadBalancer**, so all
   Gateways share one Sōzu `:80`/`:443`; two hostname-less routes on the same path collide on key
   `(:8080,*,/path)` (first wins). Per-Gateway addresses would need multiple LBs (unavailable), so
-  this is a platform-constrained limit. Real users on a shared LB route by hostname (no collision).
+  this is a platform-constrained limit — it drives most of the remaining routing/filter failures
+  (`HTTPRouteMatchingAcrossRoutes`, `HTTPRoutePathMatchOrder`, `HostnameIntersection`,
+  `ListenerHostnameMatching`, and the extended `RedirectScheme`/`MethodMatching`/header-modifier
+  tests). Real users on a shared LB route by hostname (no collision).
 
 **Implementable remaining gaps** (would raise the count):
-1. **Gateway listener status** — `.status.listeners[]` (conditions, `supportedKinds`, `attachedRoutes`):
-   unblocks `GatewayWithAttachedRoutes`, `GatewayModifyListeners`, `GatewayInvalidRouteKind/TLSConfiguration`,
-   `GatewaySecret*ReferenceGrant*` (~8, purely additive — best ROI).
-2. **Header `set` vs append** — Gateway `set` must *replace*; Sōzu *appends* (observed
+1. **Header `set` vs append** — Gateway `set` must *replace*; Sōzu *appends* (observed
    `original,header-set`). Fixable only if Sōzu can replace a header; else a hard limit.
-3. Hostname intersection / path-match order / per-Gateway HTTPS listener.
+2. Per-Gateway HTTPS listener (`HTTPRouteHTTPSListener`); cert `ReferenceGrant` negatives
+   (`GatewaySecret{Invalid,Missing}ReferenceGrant`).
 
 Reproduce: see the harness + commands in `CONFORMANCE-HANDOFF.md`.
 

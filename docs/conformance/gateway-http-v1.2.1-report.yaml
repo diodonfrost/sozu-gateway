@@ -1,5 +1,5 @@
 apiVersion: gateway.networking.k8s.io/v1
-date: "2026-06-25T11:05:05Z"
+date: "2026-06-25T13:52:26Z"
 gatewayAPIChannel: standard
 gatewayAPIVersion: v1.2.1
 implementation:
@@ -14,14 +14,8 @@ mode: default
 profiles:
 - core:
     failedTests:
-    - GatewayInvalidRouteKind
-    - GatewayInvalidTLSConfiguration
-    - GatewayModifyListeners
     - GatewaySecretInvalidReferenceGrant
     - GatewaySecretMissingReferenceGrant
-    - GatewaySecretReferenceGrantAllInNamespace
-    - GatewaySecretReferenceGrantSpecific
-    - GatewayWithAttachedRoutes
     - HTTPRouteHTTPSListener
     - HTTPRouteHeaderMatching
     - HTTPRouteHostnameIntersection
@@ -40,8 +34,8 @@ profiles:
     - HTTPRouteWeight
     result: failure
     statistics:
-      Failed: 24
-      Passed: 9
+      Failed: 18
+      Passed: 15
       Skipped: 0
   extended:
     failedTests:
@@ -77,5 +71,5 @@ profiles:
     - HTTPRouteRequestMultipleMirrors
     - HTTPRouteRequestTimeout
   name: GATEWAY-HTTP
-  summary: Core tests failed with 24 test failures. Extended tests failed with 3 test
+  summary: Core tests failed with 18 test failures. Extended tests failed with 3 test
     failures.
