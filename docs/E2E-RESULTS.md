@@ -110,20 +110,31 @@ run against a live cluster (`GatewayClass=sozu`, `rbac.allowStatusWrites=true`).
 
 | | Passed | Failed | Result |
 |---|---|---|---|
-| Core | **15** | 18 | failure |
+| Core | **16** | 17 | failure |
 | Extended (declared: `HTTPRouteResponseHeaderModification`, `HTTPRouteSchemeRedirect`, `HTTPRouteMethodMatching`) | 0 | 3 | failure |
 
 The profile is **not passing** — and with Sōzu it **cannot** be (see hard limits below), so the goal
 is a well-documented **partial** result, not the "Conformant" badge. Running the suite surfaced and
 fixed real bugs (`observedGeneration`; a reconcile wedge on non-idempotent `Remove*`), unblocked
 hostname-less routing (catch-all `*`), added invalid-route status reasons + `allowedRoutes.namespaces`,
-and implemented per-listener status (`.status.listeners[]`) — taking core from **3 → 15**.
+per-listener status (`.status.listeners[]`), and cert `ReferenceGrant` denial reporting — taking core
+from **3 → 16**.
 
-**Passing (15):** the 3 `*ObservedGenerationBump`; `HTTPRouteSimpleSameNamespace`,
+> Counts vary run-to-run **15–16** because a few status-polling tests flake against the poc
+> cluster's API latency (raise the conformance client QPS); ~17–18 distinct core tests pass across
+> runs/in isolation. **Note:** the hostname/path routing tests (`ListenerHostnameMatching`,
+> `HostnameIntersection`, `PathMatchOrder`) were verified to route correctly by hand (exact +
+> wildcard + precedence + one-label wildcard depth all behave), but fail in the suite at **base
+> setup**: the base `same-namespace-with-https-listener` (HTTPS-only) Gateway intermittently isn't
+> `Programmed` in time because the controller reports `SecretNotFound` for the suite's
+> programmatically-created `tls-validity-checks-certificate` — a setup-timing gate, not a routing bug.
+
+**Passing (16):** the 3 `*ObservedGenerationBump`; `HTTPRouteSimpleSameNamespace`,
 `HTTPRouteExactPathMatching`, `HTTPRouteCrossNamespace`, `HTTPRouteServiceTypes`;
 `HTTPRouteInvalidParentRefNotMatchingSectionName`, `HTTPRouteInvalidCrossNamespaceParentRef`;
 `GatewayWithAttachedRoutes`, `GatewayModifyListeners`, `GatewayInvalidRouteKind`,
-`GatewayInvalidTLSConfiguration`, `GatewaySecretReferenceGrant{AllInNamespace,Specific}`.
+`GatewayInvalidTLSConfiguration`, `GatewaySecretReferenceGrant{AllInNamespace,Specific}`,
+`GatewaySecret{Invalid,Missing}ReferenceGrant`.
 (`GatewayWithAttachedRoutesWithPort8080` also passes in isolation; it flaked here under client
 throttling — run the suite with a raised client QPS, see `CONFORMANCE-HANDOFF.md`.)
 
@@ -133,6 +144,11 @@ throttling — run the suite with a raised client QPS, see `CONFORMANCE-HANDOFF.
   `*ReferenceGrant` / `…PartiallyInvalid…` traffic checks.
 - **No weighted split** (`HTTPRouteWeight`) and **no header/query-value matching**
   (`HTTPRouteHeaderMatching`, parts of `HTTPRouteMatching`).
+- **Header `set` appends instead of replacing.** Gateway `set` must overwrite an existing header,
+  but the deployed `clevercloud/sozu:2.1.0` data plane appends (observed `original,header-set`) —
+  so `HTTPRouteRequestHeaderModifier`/`ResponseHeaderModifier` fail. (The 2.1.0 *command-lib*
+  documents set/replace; the running binary doesn't honour it, so this is a data-plane gap pending a
+  Sōzu build that replaces.)
 - **Catch-all collisions.** Clever Cloud's cluster currently allows **one LoadBalancer**, so all
   Gateways share one Sōzu `:80`/`:443`; two hostname-less routes on the same path collide on key
   `(:8080,*,/path)` (first wins). Per-Gateway addresses would need multiple LBs (unavailable), so
@@ -142,10 +158,11 @@ throttling — run the suite with a raised client QPS, see `CONFORMANCE-HANDOFF.
   tests). Real users on a shared LB route by hostname (no collision).
 
 **Implementable remaining gaps** (would raise the count):
-1. **Header `set` vs append** — Gateway `set` must *replace*; Sōzu *appends* (observed
-   `original,header-set`). Fixable only if Sōzu can replace a header; else a hard limit.
-2. Per-Gateway HTTPS listener (`HTTPRouteHTTPSListener`); cert `ReferenceGrant` negatives
-   (`GatewaySecret{Invalid,Missing}ReferenceGrant`).
+1. **Per-Gateway HTTPS listener** (`HTTPRouteHTTPSListener`) — multi-listener HTTPS with SNI on the
+   shared `:443`; intertwined with the catch-all-collision limit above.
+
+(`GatewaySecret{Invalid,Missing}ReferenceGrant` now pass — cert `ReferenceGrant` denial reports
+`RefNotPermitted`, with the grant `group` checked too.)
 
 Reproduce: see the harness + commands in `CONFORMANCE-HANDOFF.md`.
 
