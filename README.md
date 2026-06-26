@@ -9,7 +9,7 @@
 <div align="center">
 
 <a href="https://github.com/CleverCloud/sozu-gateway/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/CleverCloud/sozu-gateway/ci.yml?branch=master&style=for-the-badge&logo=github&label=CI"></a>
-<a href="LICENSE"><img src="https://img.shields.io/github/license/CleverCloud/sozu-gateway?style=for-the-badge&color=blue"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=for-the-badge"></a>
 <a href="https://github.com/CleverCloud/sozu-gateway/releases"><img src="https://img.shields.io/github/v/release/CleverCloud/sozu-gateway?style=for-the-badge&logo=github&label=release"></a>
 
 </div>
