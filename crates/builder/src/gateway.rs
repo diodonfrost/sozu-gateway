@@ -34,7 +34,8 @@ use sozu_gw_gateway_api::httproute::{
 use sozu_gw_ir as ir;
 
 use crate::{
-    add_service_route, extract_cert, meta_nn, BuildConfig, Index, Inputs, PortRef, Problem,
+    add_service_route, extract_cert, meta_nn, BuildConfig, FingerprintedCert, Index, Inputs,
+    PortRef, Problem,
 };
 
 const GW_GROUP: &str = "gateway.networking.k8s.io";
@@ -160,7 +161,7 @@ fn build_listener(
     index: &Index,
     gw_ns: &str,
     l: &sozu_gw_gateway_api::gateway::GatewayListeners,
-    certificates: &mut Vec<ir::Certificate>,
+    certificates: &mut Vec<FingerprintedCert>,
     problems: &mut Vec<Problem>,
 ) -> ListenerInfo {
     let routable = matches!(l.protocol.as_str(), "HTTP" | "HTTPS");
@@ -258,7 +259,7 @@ pub(crate) fn build_gateway(
     clusters: &mut BTreeMap<String, ir::Cluster>,
     backends: &mut BTreeMap<String, ir::Backend>,
     frontends: &mut Vec<ir::Frontend>,
-    certificates: &mut Vec<ir::Certificate>,
+    certificates: &mut Vec<FingerprintedCert>,
 ) -> GatewayBuildResults {
     // 1. GatewayClasses we own (controllerName matches).
     let mut classes = Vec::new();
@@ -436,7 +437,7 @@ fn load_listener_certs(
     index: &Index,
     gateway_ns: &str,
     listener: &sozu_gw_gateway_api::gateway::GatewayListeners,
-    certificates: &mut Vec<ir::Certificate>,
+    certificates: &mut Vec<FingerprintedCert>,
     problems: &mut Vec<Problem>,
 ) -> (bool, &'static str) {
     let Some(tls) = &listener.tls else {
@@ -487,13 +488,16 @@ fn load_listener_certs(
                 secret: cref.name.clone(),
             }),
             Some(secret) => match extract_cert(secret) {
-                Ok((leaf, chain, key, _fingerprint)) => {
-                    certificates.push(ir::Certificate {
-                        listener: cfg.https_listener,
-                        certificate: leaf,
-                        chain,
-                        key,
-                        names: names.clone(),
+                Ok((leaf, chain, key, fingerprint)) => {
+                    certificates.push(FingerprintedCert {
+                        fingerprint,
+                        cert: ir::Certificate {
+                            listener: cfg.https_listener,
+                            certificate: leaf,
+                            chain,
+                            key,
+                            names: names.clone(),
+                        },
                     });
                     loaded = true;
                 }

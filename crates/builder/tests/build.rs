@@ -532,6 +532,66 @@ fn certs_sharing_a_secret_are_merged_with_unioned_names() {
 }
 
 #[test]
+fn same_der_cert_with_different_pem_wrapping_is_merged() {
+    // Re-encode CERT_A's base64 body at a different line width: same DER (so
+    // the same fingerprint — Sōzu's identity), byte-different PEM text. This
+    // is the cert-manager vs hand-made Secret shape. The two entries must
+    // merge into ONE certificate with the unioned names, or the translator
+    // would churn ReplaceCertificate forever and one hostname would lose TLS.
+    let body: String = CERT_A.lines().filter(|l| !l.starts_with("-----")).collect();
+    let mut rewrapped = String::from("-----BEGIN CERTIFICATE-----\n");
+    for chunk in body.as_bytes().chunks(48) {
+        rewrapped.push_str(std::str::from_utf8(chunk).expect("ascii base64"));
+        rewrapped.push('\n');
+    }
+    rewrapped.push_str("-----END CERTIFICATE-----\n");
+    assert_ne!(rewrapped, CERT_A, "the PEM texts must differ");
+
+    let ingress = |name: &str, host: &str, secret: &str| -> Ingress {
+        from_json(json!({
+            "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+            "metadata": { "name": name, "namespace": "demo" },
+            "spec": {
+                "ingressClassName": "sozu",
+                "tls": [{ "hosts": [host], "secretName": secret }],
+                "rules": [{
+                    "host": host,
+                    "http": { "paths": [
+                        { "path": "/", "pathType": "Prefix",
+                          "backend": { "service": { "name": "web", "port": { "number": 80 } } } }
+                    ]}
+                }]
+            }
+        }))
+    };
+    let inputs = Inputs {
+        ingresses: vec![
+            ingress("a", "a.example.com", "tls-a"),
+            ingress("b", "b.example.com", "tls-b"),
+        ],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        secrets: vec![
+            tls_secret("demo", "tls-a", CERT_A, KEY_A),
+            tls_secret("demo", "tls-b", &rewrapped, KEY_A),
+        ],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(
+        out.ir.certificates.len(),
+        1,
+        "one cert per (listener, fingerprint), regardless of PEM wrapping"
+    );
+    assert_eq!(
+        out.ir.certificates[0].names,
+        vec!["a.example.com".to_string(), "b.example.com".to_string()],
+        "names unioned across both Secrets"
+    );
+}
+
+#[test]
 fn tcp_services_configmap_maps_to_l4_frontend() {
     let cm: ConfigMap = from_json(json!({
         "apiVersion": "v1", "kind": "ConfigMap",

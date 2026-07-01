@@ -473,24 +473,38 @@ pub(crate) fn add_service_route(
     Ok((cluster_id, !addrs.is_empty()))
 }
 
-/// Merge certificates that share Sōzu's identity at a listener — same leaf PEM
-/// (hence same fingerprint) on the same listener — into one entry, unioning
-/// their SNI names. The same TLS Secret routinely backs several routes with
-/// different hostnames (e.g. an Ingress and a Gateway listener); Sōzu stores
-/// exactly one certificate per `(listener, fingerprint)`, so the IR must present
-/// one too. Otherwise the translator would emit a `ReplaceCertificate` on every
-/// reconcile, forever flipping between the conflicting name sets.
-fn merge_certificates(certs: Vec<ir::Certificate>) -> Vec<ir::Certificate> {
-    let mut merged: Vec<ir::Certificate> = Vec::new();
+/// An IR certificate paired with its leaf fingerprint (SHA-256 of the DER, as
+/// computed by [`extract_cert`]) — Sōzu's identity for a loaded certificate.
+/// Carried until [`merge_certificates`] so the merge keys on the DER identity,
+/// not on PEM bytes.
+pub(crate) struct FingerprintedCert {
+    pub(crate) fingerprint: Vec<u8>,
+    pub(crate) cert: ir::Certificate,
+}
+
+/// Merge certificates that share Sōzu's identity at a listener — same leaf
+/// `(listener, fingerprint)` — into one entry, unioning their SNI names. The
+/// same certificate routinely backs several routes with different hostnames
+/// (e.g. an Ingress and a Gateway listener); Sōzu stores exactly one
+/// certificate per `(listener, fingerprint)`, so the IR must present one too.
+/// Otherwise the translator would emit a `ReplaceCertificate` on every
+/// reconcile, forever flipping between the conflicting name sets. Keying on
+/// the fingerprint (not the PEM text) matters: two Secrets holding the same
+/// DER re-encoded with different line wrapping (cert-manager vs hand-made)
+/// are still one certificate to Sōzu. The first occurrence fixes the entry's
+/// position and PEM bytes (the DER is identical anyway).
+fn merge_certificates(certs: Vec<FingerprintedCert>) -> Vec<ir::Certificate> {
+    let mut merged: Vec<FingerprintedCert> = Vec::new();
     for c in certs {
         match merged
             .iter_mut()
-            .find(|e| e.listener == c.listener && e.certificate == c.certificate)
+            .find(|e| e.cert.listener == c.cert.listener && e.fingerprint == c.fingerprint)
         {
-            Some(existing) => existing.names.extend(c.names),
+            Some(existing) => existing.cert.names.extend(c.cert.names),
             None => merged.push(c),
         }
     }
+    let mut merged: Vec<ir::Certificate> = merged.into_iter().map(|c| c.cert).collect();
     for c in &mut merged {
         c.names.sort();
         c.names.dedup();
@@ -585,7 +599,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
     let mut clusters: BTreeMap<String, ir::Cluster> = BTreeMap::new();
     let mut backends: BTreeMap<String, ir::Backend> = BTreeMap::new();
     let mut frontends: Vec<ir::Frontend> = Vec::new();
-    let mut certificates: Vec<ir::Certificate> = Vec::new();
+    let mut certificates: Vec<FingerprintedCert> = Vec::new();
     let mut results: Vec<IngressResult> = Vec::new();
 
     for ingress in &inputs.ingresses {
@@ -627,16 +641,19 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                     secret: secret_name.clone(),
                 }),
                 Some(secret) => match extract_cert(secret) {
-                    Ok((leaf, chain, key, _fingerprint)) => {
+                    Ok((leaf, chain, key, fingerprint)) => {
                         for h in &hosts {
                             tls_ready_hosts.insert(h.clone());
                         }
-                        certificates.push(ir::Certificate {
-                            listener: cfg.https_listener,
-                            certificate: leaf,
-                            chain,
-                            key,
-                            names: hosts,
+                        certificates.push(FingerprintedCert {
+                            fingerprint,
+                            cert: ir::Certificate {
+                                listener: cfg.https_listener,
+                                certificate: leaf,
+                                chain,
+                                key,
+                                names: hosts,
+                            },
                         });
                     }
                     Err(reason) => problems.push(Problem::InvalidCertificate {
