@@ -263,17 +263,77 @@ fn mark_ready(ready: &AtomicBool) {
     }
 }
 
-/// Are the Gateway API CRDs installed? Probed by a tiny list against
-/// `GatewayClass`; a `NotFound`/discovery error means the CRDs are absent.
-async fn gateway_api_available(client: &Client) -> bool {
-    let api: Api<GatewayClass> = Api::all(client.clone());
-    match api.list(&ListParams::default().limit(1)).await {
-        Ok(_) => true,
-        Err(e) => {
-            debug!(error = %e, "Gateway API not available");
-            false
+/// The Gateway API kinds the controller watches. Gateway mode requires *all*
+/// of them: watching a missing kind would never sync its cache, and the sync
+/// gate would kill the process — a partial install must run Ingress-only, not
+/// crash-loop.
+const GATEWAY_API_KINDS: [&str; 4] = ["GatewayClass", "Gateway", "HTTPRoute", "ReferenceGrant"];
+
+/// Are the Gateway API CRDs installed? Probed by a tiny list against **every**
+/// kind the controller watches — a partial install (e.g. GatewayClass served
+/// but ReferenceGrant absent) is a real cluster state and must read as
+/// Ingress-only (with a warning naming the missing kinds), not as gateway
+/// mode. Only a genuine `NotFound` from the apiserver (the CRD's group/kind
+/// is not served) means "absent"; any other failure — an apiserver hiccup,
+/// RBAC not yet propagated — is propagated so startup fails fast and
+/// Kubernetes restarts us, instead of silently locking the whole process into
+/// Ingress-only mode for its lifetime.
+async fn gateway_api_available(client: &Client) -> Result<bool> {
+    let served = [
+        crd_served::<GatewayClass>(client).await?,
+        crd_served::<Gateway>(client).await?,
+        crd_served::<HttpRoute>(client).await?,
+        crd_served::<ReferenceGrant>(client).await?,
+    ];
+    let missing = missing_gateway_crds(served);
+    if missing.is_empty() {
+        Ok(true)
+    } else {
+        if missing.len() == GATEWAY_API_KINDS.len() {
+            // No Gateway API at all: the ordinary Ingress-only cluster.
+            debug!("Gateway API CRDs not installed");
+        } else {
+            warn!(
+                ?missing,
+                "partial Gateway API install: some watched CRDs are not served; \
+                 running in Ingress-only mode until all of them are installed"
+            );
         }
+        Ok(false)
     }
+}
+
+/// Probe one watched kind with a tiny list: `Ok(true)` = served, `Ok(false)` =
+/// the apiserver does not serve it (`NotFound`), `Err` = anything else (fail
+/// fast).
+async fn crd_served<K>(client: &Client) -> Result<bool>
+where
+    K: Resource + Clone + DeserializeOwned + std::fmt::Debug,
+    K::DynamicType: Default,
+{
+    let api: Api<K> = Api::all(client.clone());
+    match api.list(&ListParams::default().limit(1)).await {
+        Ok(_) => Ok(true),
+        Err(e) if gateway_crds_absent(&e) => Ok(false),
+        Err(e) => Err(e).context("probe Gateway API availability"),
+    }
+}
+
+/// Pure classifier: which watched Gateway API kinds are missing, given the
+/// per-kind probe results (in [`GATEWAY_API_KINDS`] order). Any missing kind
+/// forces Ingress-only mode.
+fn missing_gateway_crds(served: [bool; 4]) -> Vec<&'static str> {
+    GATEWAY_API_KINDS
+        .iter()
+        .zip(served)
+        .filter_map(|(kind, served)| (!served).then_some(*kind))
+        .collect()
+}
+
+/// Classify the probe error: only an apiserver `NotFound` `Status` (what the
+/// list returns when the CRD is not installed) means the CRD is absent.
+fn gateway_crds_absent(err: &kube::Error) -> bool {
+    matches!(err, kube::Error::Api(status) if status.is_not_found())
 }
 
 /// Run one restart-generation check (see [`shadow::check_restart_generation`]),
@@ -490,7 +550,7 @@ async fn main() -> Result<()> {
     let (gateways, gw_w) = reflector::store();
     let (http_routes, hr_w) = reflector::store();
     let (reference_grants, rg_w) = reflector::store();
-    let gateway_api_enabled = gateway_api_available(&client).await;
+    let gateway_api_enabled = gateway_api_available(&client).await?;
     if gateway_api_enabled {
         info!("Gateway API detected; watching gateway.networking.k8s.io resources");
         spawn_watch::<GatewayClass>(Api::all(client.clone()), gc_w, tx.clone(), "gatewayclass");
@@ -539,7 +599,10 @@ async fn main() -> Result<()> {
     };
     tokio::time::timeout(Duration::from_secs(120), sync)
         .await
-        .context("timed out waiting for informer caches to sync (check RBAC)")?
+        .context(
+            "timed out waiting for informer caches to sync \
+             (check RBAC, and that every watched CRD is installed and served)",
+        )?
         .context("informer cache writer dropped before becoming ready")?;
     info!("caches synced");
 
@@ -708,6 +771,61 @@ mod tests {
         let (store, writer) = reflector::store::<ConfigMap>();
         drop(writer);
         assert!(ready_when(true, &store).await.is_err());
+    }
+
+    #[test]
+    fn only_a_not_found_status_reads_as_crds_absent() {
+        use kube::core::Status;
+
+        // What the apiserver returns when the CRD's group/kind is not served.
+        let not_found = kube::Error::Api(
+            Status::failure(
+                "the server could not find the requested resource",
+                "NotFound",
+            )
+            .with_code(404)
+            .boxed(),
+        );
+        assert!(gateway_crds_absent(&not_found));
+
+        // RBAC not yet propagated: a transient failure, never "absent".
+        let forbidden = kube::Error::Api(
+            Status::failure("gatewayclasses is forbidden", "Forbidden")
+                .with_code(403)
+                .boxed(),
+        );
+        assert!(!gateway_crds_absent(&forbidden));
+
+        // An apiserver hiccup must fail fast, not lock in Ingress-only mode.
+        let unavailable = kube::Error::Api(
+            Status::failure("etcdserver: request timed out", "InternalError")
+                .with_code(500)
+                .boxed(),
+        );
+        assert!(!gateway_crds_absent(&unavailable));
+    }
+
+    #[test]
+    fn any_missing_crd_forces_ingress_only_mode() {
+        // Full install: gateway mode.
+        assert!(missing_gateway_crds([true, true, true, true]).is_empty());
+        // Partial install (e.g. the standard channel applied without
+        // ReferenceGrant): Ingress-only, naming exactly the missing kind —
+        // gateway mode would watch it, never sync, and crash-loop at the
+        // cache gate.
+        assert_eq!(
+            missing_gateway_crds([true, true, true, false]),
+            vec!["ReferenceGrant"]
+        );
+        assert_eq!(
+            missing_gateway_crds([true, false, true, false]),
+            vec!["Gateway", "ReferenceGrant"]
+        );
+        // Nothing installed: the ordinary Ingress-only cluster.
+        assert_eq!(
+            missing_gateway_crds([false, false, false, false]),
+            GATEWAY_API_KINDS.to_vec()
+        );
     }
 
     #[test]
