@@ -10,6 +10,7 @@
 //! (IR → diff → commands), `sozu-agent` (socket I/O). This file is just the
 //! kube-rs wiring and the reconcile loop.
 
+use std::collections::BTreeSet;
 use std::hash::Hash;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -243,6 +244,27 @@ async fn gateway_api_available(client: &Client) -> bool {
             false
         }
     }
+}
+
+/// Run one restart-generation check (see [`shadow::check_restart_generation`]),
+/// consuming the pending reconnect signal only when the probe *succeeds*: on a
+/// probe error `acked_reconnects` stays behind the agent's epoch, so the
+/// reconnect remains visible and the check is retried instead of silently
+/// dropped.
+async fn probe_sozu_generation(
+    agent: &SozuAgentHandle,
+    acked_reconnects: &mut u64,
+    baseline: &mut Option<BTreeSet<i32>>,
+    shadow: &mut Ir,
+) -> shadow::GenerationCheck {
+    // Read the epoch *before* the probe: a reconnect landing mid-probe stays
+    // pending and triggers one more (cheap, idempotent) check.
+    let pending = agent.reconnect_epoch();
+    let outcome = shadow::check_restart_generation(agent, baseline, shadow).await;
+    if outcome != shadow::GenerationCheck::ProbeFailed {
+        *acked_reconnects = pending;
+    }
+    outcome
 }
 
 /// One global reconcile: caches → IR → diff → apply. Updates `shadow` (the
@@ -498,6 +520,23 @@ async fn main() -> Result<()> {
     let probe_file = format!("{}.probe", args.shadow_file);
     let mut shadow = shadow::load_initial(&agent, &args.shadow_file, &probe_file).await;
 
+    // Baseline for Sōzu restart detection: its current *worker generation*
+    // (live worker-PID set). Any later change — the main process restarting
+    // and forking fresh workers, or a single worker bounce — resets the shadow
+    // so the full state is re-applied. A failed capture leaves it unset; the
+    // first successful check then resets a non-empty shadow (an unproven
+    // generation is not trusted) and establishes the baseline.
+    let mut worker_baseline = match agent.worker_pids().await {
+        Ok(pids) => Some(pids),
+        Err(e) => {
+            warn!(error = %e, "could not capture Sōzu's worker-PID baseline; will capture it on the first successful probe");
+            None
+        }
+    };
+    // The reconnect epoch acknowledged by a successful restart probe; anything
+    // newer is a pending reconnect to investigate before trusting the shadow.
+    let mut acked_reconnects = agent.reconnect_epoch();
+
     let debounce = Duration::from_millis(args.debounce_ms);
     let mut resync = tokio::time::interval(Duration::from_secs(args.resync_secs));
     resync.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -513,9 +552,25 @@ async fn main() -> Result<()> {
         Ok(()) => mark_ready(&ready),
         Err(e) => error!(error = ?e, "initial reconcile failed; will retry"),
     }
+    // A reconnect can land *during* that first apply (Sōzu restarting
+    // mid-batch): probe right away and nudge the loop when a full re-apply or
+    // a probe retry is due, instead of waiting for a watch event.
+    if agent.reconnect_epoch() != acked_reconnects
+        && probe_sozu_generation(
+            &agent,
+            &mut acked_reconnects,
+            &mut worker_baseline,
+            &mut shadow,
+        )
+        .await
+            != shadow::GenerationCheck::Unchanged
+    {
+        let _ = tx.try_send(());
+    }
 
     loop {
         // Wait for a change signal or the resync tick.
+        let mut check_sozu = false;
         tokio::select! {
             maybe = rx.recv() => {
                 if maybe.is_none() { warn!("all watchers gone; exiting"); break; }
@@ -525,14 +580,58 @@ async fn main() -> Result<()> {
             }
             _ = resync.tick() => {
                 debug!("periodic resync");
+                check_sozu = true;
             }
             _ = sigterm.recv() => { info!("SIGTERM received; shutting down"); break; }
             _ = sigint.recv() => { info!("SIGINT received; shutting down"); break; }
         }
 
+        // If Sōzu restarted under us, the agent reconnects transparently and
+        // the diff against the stale shadow stays empty — every request would
+        // 404 forever. Check Sōzu's restart generation (its worker-PID set) on
+        // every resync tick and whenever a reconnect is pending, resetting the
+        // shadow on a change so the reconcile below re-applies the full state.
+        // The reconnect signal is consumed only by a *successful* probe: on a
+        // failure it stays pending and the loop is nudged, so the check is
+        // retried promptly even with resync disabled and no watch traffic.
+        if agent.reconnect_epoch() != acked_reconnects {
+            check_sozu = true;
+        }
+        if check_sozu
+            && probe_sozu_generation(
+                &agent,
+                &mut acked_reconnects,
+                &mut worker_baseline,
+                &mut shadow,
+            )
+            .await
+                == shadow::GenerationCheck::ProbeFailed
+        {
+            let _ = tx.try_send(());
+        }
+
         match reconcile(&args, &client, &stores, &agent, &mut shadow).await {
             Ok(()) => mark_ready(&ready),
             Err(e) => error!(error = ?e, "reconcile failed; will retry on next event/resync"),
+        }
+
+        // The emptiness race, closed: a reconnect landing *mid-apply* means
+        // the rest of the batch was applied to a freshly restarted Sōzu — it
+        // is no longer empty, but it only holds that delta. Probe immediately
+        // after the apply instead of waiting for the next event; on a reset (a
+        // full re-apply is due) or a failed probe (a retry is due), nudge the
+        // channel so the next pass runs promptly.
+        if agent.reconnect_epoch() != acked_reconnects
+            && probe_sozu_generation(
+                &agent,
+                &mut acked_reconnects,
+                &mut worker_baseline,
+                &mut shadow,
+            )
+            .await
+                != shadow::GenerationCheck::Unchanged
+        {
+            let _ = tx.try_send(());
         }
     }
 

@@ -17,14 +17,16 @@
 //!    queue, so concurrent async callers never share the socket unsafely.
 #![forbid(unsafe_code)]
 
-use std::sync::mpsc;
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use sozu_command_lib::channel::Channel;
 use sozu_command_lib::proto::command::{
     request::RequestType, response_content::ContentType, Request, Response, ResponseContent,
-    ResponseStatus, Status,
+    ResponseStatus, RunState, Status,
 };
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -150,7 +152,7 @@ pub enum SozuError {
     Channel(String),
     #[error("sozu rejected the request: {0}")]
     Failure(String),
-    #[error("sozu returned an unexpected response (no metrics content)")]
+    #[error("sozu returned an unexpected response (missing the expected content)")]
     UnexpectedResponse,
     #[error("sozu-agent worker thread is gone")]
     WorkerGone,
@@ -164,6 +166,16 @@ pub struct SozuAgent {
     read_timeout: Duration,
     write_timeout: Duration,
     channel: Option<Channel<Request, Response>>,
+    /// Monotone count of reconnect attempts: bumped whenever an *established*
+    /// channel broke and a reconnect-and-retry was attempted — a signal that
+    /// the peer may have restarted and lost its state. Shared with
+    /// [`SozuAgentHandle`], which exposes it as [`SozuAgentHandle::reconnect_epoch`];
+    /// a counter (instead of a swap-off flag) lets the controller acknowledge
+    /// a reconnect only once its restart probe *succeeded*, so a reconnect
+    /// whose probe failed stays visible and is retried. Bumped even when the
+    /// retry itself fails — the established connection is gone either way.
+    /// The lazy first connect never bumps it.
+    reconnects: Arc<AtomicU64>,
 }
 
 impl SozuAgent {
@@ -175,6 +187,7 @@ impl SozuAgent {
             read_timeout: DEFAULT_READ_TIMEOUT,
             write_timeout: DEFAULT_WRITE_TIMEOUT,
             channel: None,
+            reconnects: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -290,6 +303,10 @@ impl SozuAgent {
             Err(channel_error) => {
                 warn!(error = %channel_error, "sozu channel error, reconnecting and retrying");
                 self.channel = None;
+                // Bump the epoch *before* retrying: even if the retry also
+                // fails, the established connection is gone and the peer may
+                // have restarted with empty state.
+                self.reconnects.fetch_add(1, Ordering::Relaxed);
                 thread::sleep(RECONNECT_BACKOFF);
                 let channel = self.channel_mut()?;
                 Self::send_one(channel, read_timeout, request)
@@ -370,6 +387,31 @@ impl SozuAgent {
         self.apply_one(&RequestType::Status(Status {}).into())
     }
 
+    /// The PIDs of Sōzu's live workers — its *restart generation*. A `Status`
+    /// round-trip: the response carries `ContentType::Workers(WorkerInfos)`
+    /// (per-worker id, pid, run_state; verified live, see PROTOCOL.md). Any
+    /// restart of the Sōzu main process (which forks fresh workers) or bounce
+    /// of a single worker changes this set, so comparing it against a baseline
+    /// detects a restart even when Sōzu already holds *some* state again —
+    /// unlike an emptiness probe. `Stopped` workers are excluded: they no
+    /// longer serve, and Sōzu prunes them from the list on its own schedule,
+    /// which would otherwise read as a second spurious generation change.
+    pub fn worker_pids(&mut self) -> Result<BTreeSet<i32>, SozuError> {
+        let request: Request = RequestType::Status(Status {}).into();
+        let response = self.send_with_retry(&request)?;
+        match response.content {
+            Some(ResponseContent {
+                content_type: Some(ContentType::Workers(infos)),
+            }) => Ok(infos
+                .vec
+                .iter()
+                .filter(|worker| worker.run_state != RunState::Stopped as i32)
+                .map(|worker| worker.pid)
+                .collect()),
+            _ => Err(SozuError::UnexpectedResponse),
+        }
+    }
+
     /// Ask Sōzu to load its routing state from a file path (visible to Sōzu).
     pub fn load_state(&mut self, path: impl Into<String>) -> Result<(), SozuError> {
         self.apply_one(&RequestType::LoadState(path.into()).into())
@@ -409,6 +451,7 @@ enum Job {
         QueryMetricsOptions,
         oneshot::Sender<Result<AggregatedMetrics, SozuError>>,
     ),
+    WorkerPids(oneshot::Sender<Result<BTreeSet<i32>, SozuError>>),
 }
 
 /// Cloneable async handle to a single Sōzu command socket. All work runs on one
@@ -416,6 +459,7 @@ enum Job {
 #[derive(Clone)]
 pub struct SozuAgentHandle {
     tx: mpsc::Sender<Job>,
+    reconnects: Arc<AtomicU64>,
 }
 
 impl SozuAgentHandle {
@@ -425,10 +469,13 @@ impl SozuAgentHandle {
     pub fn spawn(path: impl Into<String>) -> std::io::Result<Self> {
         let path = path.into();
         let (tx, rx) = mpsc::channel::<Job>();
+        let reconnects = Arc::new(AtomicU64::new(0));
+        let epoch = reconnects.clone();
         thread::Builder::new()
             .name("sozu-agent".to_string())
             .spawn(move || {
                 let mut agent = SozuAgent::new(path);
+                agent.reconnects = epoch;
                 // Ends when every `SozuAgentHandle` (and thus every Sender) drops.
                 for job in rx {
                     match job {
@@ -441,11 +488,26 @@ impl SozuAgentHandle {
                         Job::QueryMetrics(options, reply) => {
                             let _ = reply.send(agent.query_metrics(options));
                         }
+                        Job::WorkerPids(reply) => {
+                            let _ = reply.send(agent.worker_pids());
+                        }
                     }
                 }
                 debug!("sozu-agent worker thread exiting");
             })?;
-        Ok(Self { tx })
+        Ok(Self { tx, reconnects })
+    }
+
+    /// Monotone count of reconnect-and-retry attempts on the command socket
+    /// (a reconnect after a channel error on an *established* connection —
+    /// the signal that the peer may have restarted and lost its routing
+    /// state). The controller records the value it has *acknowledged* — only
+    /// after a successful restart probe — and treats any newer value as a
+    /// pending reconnect to investigate. Deliberately not a swap-off flag:
+    /// consuming the signal before the probe's outcome is known would lose a
+    /// reconnect whose one probe errored.
+    pub fn reconnect_epoch(&self) -> u64 {
+        self.reconnects.load(Ordering::Relaxed)
     }
 
     /// Apply a batch of requests, awaiting Sōzu's acks.
@@ -478,6 +540,16 @@ impl SozuAgentHandle {
             .map_err(|_| SozuError::WorkerGone)?;
         reply_rx.await.map_err(|_| SozuError::WorkerGone)?
     }
+
+    /// Fetch the PIDs of Sōzu's live workers — its restart generation (see
+    /// [`SozuAgent::worker_pids`]).
+    pub async fn worker_pids(&self) -> Result<BTreeSet<i32>, SozuError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Job::WorkerPids(reply_tx))
+            .map_err(|_| SozuError::WorkerGone)?;
+        reply_rx.await.map_err(|_| SozuError::WorkerGone)?
+    }
 }
 
 #[cfg(test)]
@@ -488,6 +560,7 @@ mod tests {
 
     use sozu_command_lib::proto::command::{
         Cluster, DeactivateListener, ListenerType, RequestHttpFrontend, TcpListenerConfig,
+        WorkerInfo, WorkerInfos,
     };
 
     /// A failure message shaped like the real thing: the main process wraps
@@ -883,6 +956,159 @@ mod tests {
         connect_thread.join().expect("connect thread");
         drop(fillers);
         drop(listener);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reconnect_after_a_broken_channel_bumps_the_reconnect_epoch() {
+        let path = temp_socket_path("reconnect");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind fake sozu");
+        let server = thread::spawn(move || {
+            // First connection: accept and drop immediately — a Sōzu that died
+            // (and possibly restarted) under an established channel.
+            drop(listener.accept().expect("accept first connection"));
+            // Second connection: a healthy Sōzu answering Ok.
+            let (stream, _) = listener.accept().expect("accept second connection");
+            stream.set_nonblocking(true).expect("set nonblocking");
+            let mut channel: Channel<Response, Request> =
+                Channel::new(mio::net::UnixStream::from_std(stream), 16_384, 65_536);
+            channel.blocking().expect("set blocking");
+            while channel
+                .read_message_blocking_timeout(Some(Duration::from_secs(5)))
+                .is_ok()
+            {
+                channel
+                    .write_message(&Response {
+                        status: ResponseStatus::Ok as i32,
+                        message: String::new(),
+                        content: None,
+                    })
+                    .expect("write response");
+            }
+        });
+
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        agent.read_timeout = Duration::from_secs(5);
+        assert_eq!(
+            agent.reconnects.load(Ordering::Relaxed),
+            0,
+            "the epoch must start at zero"
+        );
+        agent
+            .status()
+            .expect("the request must succeed after the transparent reconnect");
+        assert_eq!(
+            agent.reconnects.load(Ordering::Relaxed),
+            1,
+            "a reconnect-and-retry must bump the epoch"
+        );
+
+        drop(agent);
+        server.join().expect("fake sozu thread");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The reconnect signal must survive a *failed* retry: the established
+    /// connection is gone (the peer may have restarted empty) even when the
+    /// reconnect attempt itself cannot reach it, so the controller's restart
+    /// probe must still see a pending reconnect and retry — a signal consumed
+    /// (or never raised) on the failure path would be lost forever.
+    #[test]
+    fn a_failed_retry_still_bumps_the_reconnect_epoch() {
+        let path = temp_socket_path("reconnect-fail");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind fake sozu");
+        let server = thread::spawn(move || {
+            // Accept one connection and drop it, then close the listener: the
+            // reconnect attempt finds nobody home (ECONNREFUSED on the stale
+            // socket file) and the retry fails too.
+            drop(listener.accept().expect("accept first connection"));
+            drop(listener);
+        });
+
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        // Short deadline so a retry that connects before the listener closes
+        // still fails fast on the read instead of stalling the test.
+        agent.read_timeout = Duration::from_millis(200);
+        let err = agent.status().unwrap_err();
+        assert!(matches!(err, SozuError::Channel(_)), "got {err:?}");
+        assert_eq!(
+            agent.reconnects.load(Ordering::Relaxed),
+            1,
+            "the epoch must be bumped even when the retry fails"
+        );
+
+        server.join().expect("fake sozu thread");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `worker_pids` must parse the `Status` response's `WorkerInfos` into the
+    /// live-worker PID set, excluding `Stopped` workers (Sōzu prunes those on
+    /// its own schedule, which would otherwise read as a second, spurious
+    /// generation change).
+    #[test]
+    fn worker_pids_returns_the_live_pid_set() {
+        let path = temp_socket_path("worker-pids");
+        let workers = WorkerInfos {
+            vec: vec![
+                WorkerInfo {
+                    id: 0,
+                    pid: 101,
+                    run_state: RunState::Running as i32,
+                },
+                WorkerInfo {
+                    id: 1,
+                    pid: 102,
+                    run_state: RunState::NotAnswering as i32,
+                },
+                WorkerInfo {
+                    id: 2,
+                    pid: 99,
+                    run_state: RunState::Stopped as i32,
+                },
+            ],
+        };
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![Response {
+                status: ResponseStatus::Ok as i32,
+                message: String::new(),
+                content: Some(ResponseContent {
+                    content_type: Some(ContentType::Workers(workers)),
+                }),
+            }],
+        );
+
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let pids = agent.worker_pids().expect("worker pids");
+        assert_eq!(
+            pids,
+            BTreeSet::from([101, 102]),
+            "live workers (including NotAnswering) are the generation; Stopped ones are not"
+        );
+        drop(agent);
+
+        let received = server.join().expect("fake sozu thread");
+        assert_eq!(
+            received,
+            vec![RequestType::Status(Status {}).into()],
+            "the generation probe must be a single Status round-trip"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A `Status` reply without the expected `WorkerInfos` content must be an
+    /// explicit error, never an empty (= changed) generation.
+    #[test]
+    fn worker_pids_without_workers_content_is_an_error() {
+        let path = temp_socket_path("worker-pids-empty");
+        let server = spawn_scripted_fake_sozu(&path, vec![ok_response()]);
+
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let err = agent.worker_pids().unwrap_err();
+        assert!(matches!(err, SozuError::UnexpectedResponse), "got {err:?}");
+        drop(agent);
+
+        server.join().expect("fake sozu thread");
         let _ = std::fs::remove_file(&path);
     }
 
