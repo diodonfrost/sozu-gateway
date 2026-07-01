@@ -321,8 +321,11 @@ async fn reconcile(
     status::write_ingress_status(client, &out.results, &lb_points).await;
 
     // Shadow advances only on a successful socket apply. On failure it stays at
-    // the previous applied IR; because every emitted request is idempotent,
-    // re-diffing from the unchanged shadow on the next pass safely converges.
+    // the previous applied IR. The emitted requests are not all idempotent, so
+    // re-diffing from the unchanged shadow converges thanks to Sōzu's upsert
+    // semantics for clusters/backends plus the agent's handling of the rest:
+    // already-gone teardowns are tolerated, duplicate frontend adds repaired
+    // (remove + re-add on the same route key).
     if applied {
         *shadow = out.ir;
         // Persist the new baseline so a controller-only restart resumes from it.
