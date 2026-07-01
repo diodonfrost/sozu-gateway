@@ -40,6 +40,10 @@ const DEFAULT_MAX_BUFFER_SIZE: u64 = 16 * 1024 * 1024;
 /// Upper bound on a whole request's ack sequence, so a wedged Sōzu can't hang
 /// us forever (applies across the Processing→Ok replies, not per read).
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// `SO_SNDTIMEO` on the command socket, so a Sōzu that keeps the socket open
+/// but stops reading can't block the worker thread in the kernel forever once
+/// the socket buffer fills (same order of magnitude as the read deadline).
+const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Small backoff before a reconnect-and-retry, so an unhealthy Sōzu is not
 /// hammered with reconnect storms across reconcile cycles.
 const RECONNECT_BACKOFF: Duration = Duration::from_millis(200);
@@ -158,6 +162,7 @@ pub struct SozuAgent {
     buffer_size: u64,
     max_buffer_size: u64,
     read_timeout: Duration,
+    write_timeout: Duration,
     channel: Option<Channel<Request, Response>>,
 }
 
@@ -168,15 +173,57 @@ impl SozuAgent {
             buffer_size: DEFAULT_BUFFER_SIZE,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
             read_timeout: DEFAULT_READ_TIMEOUT,
+            write_timeout: DEFAULT_WRITE_TIMEOUT,
             channel: None,
         }
     }
 
     fn connect(&mut self) -> Result<(), SozuError> {
         debug!(path = %self.path, "connecting to sozu command socket");
-        let mut channel: Channel<Request, Response> =
-            Channel::from_path(&self.path, self.buffer_size, self.max_buffer_size)
-                .map_err(|e| SozuError::Channel(format!("connect: {e:?}")))?;
+        // The stream is built by hand (rather than `Channel::from_path`) so a
+        // write timeout can be set on it: `sozu-command-lib`'s blocking write
+        // loop has no bound of its own, so a Sōzu that keeps the socket open
+        // but stops reading would block this thread in the kernel forever once
+        // the socket buffer fills. With `SO_SNDTIMEO` the write errors out
+        // instead. No read timeout is set here: the channel's
+        // `read_message_blocking_timeout` manages `SO_RCVTIMEO` itself on
+        // every call (and resets it), so a base value would not compose.
+        let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+            .map_err(|e| SozuError::Channel(format!("create socket: {e:?}")))?;
+        // `SO_SNDTIMEO` must be set BEFORE connect (which is why socket2 is
+        // used instead of `UnixStream::connect`, whose std API only exposes
+        // the option on an already-connected stream): on Linux a blocking
+        // AF_UNIX connect() waits for backlog room under the *send* timeout
+        // (`unix_wait_for_peer` sleeps under `sock_sndtimeo`, infinite by
+        // default), so against a wedged-but-alive Sōzu whose accept backlog
+        // has filled with earlier reconnect attempts, connect() itself would
+        // block the worker thread forever — the very hang this bound exists
+        // to prevent, back via a different syscall.
+        socket
+            .set_write_timeout(Some(self.write_timeout))
+            .map_err(|e| SozuError::Channel(format!("set write timeout: {e:?}")))?;
+        let address = socket2::SockAddr::unix(&self.path)
+            .map_err(|e| SozuError::Channel(format!("socket address: {e:?}")))?;
+        // A connect that times out surfaces as the same `Channel` error kind
+        // as any other connect failure, so the reconnect path handles it.
+        socket
+            .connect(&address)
+            .map_err(|e| SozuError::Channel(format!("connect: {e:?}")))?;
+        // socket2's direct Socket→UnixStream conversion is gated behind its
+        // `all` feature; the io-safety OwnedFd round-trip is ungated, safe
+        // and equivalent (both just move the fd).
+        let stream = std::os::unix::net::UnixStream::from(std::os::fd::OwnedFd::from(socket));
+        // `mio` streams are expected to be nonblocking; `Channel::blocking`
+        // below flips the mode back for the synchronous request/reply
+        // protocol (`SO_SNDTIMEO` is a socket option, it survives the flip).
+        stream
+            .set_nonblocking(true)
+            .map_err(|e| SozuError::Channel(format!("set nonblocking: {e:?}")))?;
+        let mut channel: Channel<Request, Response> = Channel::new(
+            mio::net::UnixStream::from_std(stream),
+            self.buffer_size,
+            self.max_buffer_size,
+        );
         // Blocking mode is required: a non-blocking `write_message` only buffers,
         // it does not flush to the socket.
         channel
@@ -731,6 +778,111 @@ mod tests {
 
         let received = server.join().expect("fake sozu thread");
         assert_eq!(received.len(), 1, "no repair traffic for a listener add");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A Sōzu that keeps the socket open but never reads must not hang
+    /// `apply` forever: the write timeout unblocks the kernel write, then the
+    /// read deadline and the one reconnect+retry surface a channel error.
+    /// Behavioral by necessity — `mio`'s stream exposes no timeout getter and
+    /// the crate forbids the unsafe fd round-trip that could read it back.
+    /// Without `SO_SNDTIMEO` this test hangs and trips `recv_timeout`.
+    #[test]
+    fn apply_does_not_hang_when_sozu_stops_reading() {
+        let path = temp_socket_path("stalled");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind fake sozu");
+        // A stalled Sōzu: accept the connection, hold it open, never read.
+        let (hold_tx, hold_rx) = mpsc::channel::<()>();
+        let server = thread::spawn(move || {
+            let _held = listener.accept().expect("accept");
+            let _ = hold_rx.recv();
+        });
+
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        // Short deadlines so the test is fast (defaults are 30s).
+        agent.write_timeout = Duration::from_millis(100);
+        agent.read_timeout = Duration::from_millis(100);
+
+        // A payload far larger than a unix socket buffer, so an unbounded
+        // write blocks in the kernel once the buffer fills.
+        let request: Request = RequestType::LoadState("x".repeat(8 * 1024 * 1024)).into();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let apply_thread = thread::spawn(move || {
+            let _ = done_tx.send(agent.apply(&[request]));
+        });
+
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("apply must not hang when sozu stops reading");
+        assert!(
+            matches!(result, Err(SozuError::Channel(_))),
+            "a stalled sozu cannot ack anything, got {result:?}"
+        );
+
+        let _ = hold_tx.send(());
+        apply_thread.join().expect("apply thread");
+        server.join().expect("fake sozu thread");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A wedged-but-alive Sōzu whose accept backlog is already full must not
+    /// hang `connect` forever: on Linux a blocking AF_UNIX connect() waits
+    /// for backlog room under `SO_SNDTIMEO`, which is why the agent sets the
+    /// timeout *before* connecting (std can only set it on a connected
+    /// stream). The fake listener uses the smallest backlog and never
+    /// accepts; nonblocking fillers saturate the queue without leaking
+    /// blocked threads (a nonblocking AF_UNIX connect fails fast instead of
+    /// queueing once the backlog is full). Without the pre-connect
+    /// `SO_SNDTIMEO` this test hangs and trips `recv_timeout`.
+    #[test]
+    fn connect_does_not_hang_when_the_listener_backlog_is_full() {
+        let path = temp_socket_path("backlog");
+        let address = socket2::SockAddr::unix(&path).expect("socket address");
+        let listener = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+            .expect("create listener socket");
+        listener.bind(&address).expect("bind fake sozu");
+        listener.listen(0).expect("listen with minimal backlog");
+
+        // Fill the accept queue: connects succeed instantly while there is
+        // room; the first fast failure signals saturation. Kept alive so the
+        // queue stays full for the agent's connect below.
+        let mut fillers = Vec::new();
+        for _ in 0..64 {
+            let filler = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+                .expect("create filler socket");
+            filler.set_nonblocking(true).expect("set nonblocking");
+            match filler.connect(&address) {
+                Ok(()) => fillers.push(filler),
+                Err(_) => break, // backlog full (EAGAIN on Linux)
+            }
+        }
+        assert!(
+            fillers.len() < 64,
+            "the accept queue never filled; cannot exercise a blocking connect"
+        );
+
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        // Short deadlines so the test is fast (defaults are 30s).
+        agent.write_timeout = Duration::from_millis(100);
+        agent.read_timeout = Duration::from_millis(100);
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let connect_thread = thread::spawn(move || {
+            let _ = done_tx.send(agent.status());
+        });
+
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("connect must not hang when the backlog is full");
+        assert!(
+            matches!(result, Err(SozuError::Channel(_))),
+            "a full backlog cannot yield a working channel, got {result:?}"
+        );
+
+        connect_thread.join().expect("connect thread");
+        drop(fillers);
+        drop(listener);
         let _ = std::fs::remove_file(&path);
     }
 
