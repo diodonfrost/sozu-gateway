@@ -7,7 +7,8 @@ publish.workspace = true
 license.workspace = true
 
 # sozu-agent = thin wrapper around sozu-command-lib: connect to the command
-# socket, send requests idempotently, LoadState, handle reconnection/errors.
+# socket, send requests and absorb the non-idempotent ones (teardown
+# tolerance, duplicate-add repair), LoadState, handle reconnection/errors.
 # This is the ONLY place the socket I/O lives.
 [dependencies]
 sozu-command-lib = { workspace = true }
@@ -19,6 +20,9 @@ tokio = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true }
+# Socket tests run a fake Sōzu: a `Channel<Response, Request>` built on an
+# accepted mio stream, so tests speak the crate's real wire framing.
+mio = { workspace = true }
 # End-to-end smoke example dogfoods the pure pipeline (IR -> Translator -> Agent).
 sozu-gw-ir = { workspace = true }
 sozu-gw-translator = { workspace = true }
