@@ -454,6 +454,20 @@ enum Job {
     WorkerPids(oneshot::Sender<Result<BTreeSet<i32>, SozuError>>),
 }
 
+impl Job {
+    /// Whether the caller has already given up on this job (its `oneshot`
+    /// receiver is dropped — e.g. a timed-out `/metrics` scrape). The worker
+    /// skips such jobs entirely instead of running them against the socket.
+    fn is_abandoned(&self) -> bool {
+        match self {
+            Job::Apply(_, reply) => reply.is_closed(),
+            Job::SaveState(_, reply) => reply.is_closed(),
+            Job::QueryMetrics(_, reply) => reply.is_closed(),
+            Job::WorkerPids(reply) => reply.is_closed(),
+        }
+    }
+}
+
 /// Cloneable async handle to a single Sōzu command socket. All work runs on one
 /// dedicated thread, so socket access is serialised across clones.
 #[derive(Clone)]
@@ -478,6 +492,15 @@ impl SozuAgentHandle {
                 agent.reconnects = epoch;
                 // Ends when every `SozuAgentHandle` (and thus every Sender) drops.
                 for job in rx {
+                    // A job whose reply channel is already closed was abandoned
+                    // by its caller (e.g. a timed-out /metrics scrape): skip it
+                    // without touching the socket. Executing it anyway would
+                    // let abandoned work queue ahead of routing applies and
+                    // burn socket round-trips nobody will read.
+                    if job.is_abandoned() {
+                        debug!("skipping an abandoned sozu-agent job (caller gone)");
+                        continue;
+                    }
                     match job {
                         Job::Apply(requests, reply) => {
                             let _ = reply.send(agent.apply(&requests));
@@ -1141,6 +1164,42 @@ mod tests {
             .query_metrics(QueryMetricsOptions::default())
             .unwrap_err();
         assert!(matches!(err, SozuError::Channel(_)), "got {err:?}");
+    }
+
+    /// A job whose caller already gave up (receiver dropped — what a
+    /// timed-out `/metrics` scrape leaves behind) must be skipped without
+    /// touching the socket, so abandoned work can neither stack ahead of
+    /// routing applies nor burn socket round-trips nobody will read. The
+    /// script holds exactly one response: had the abandoned job reached the
+    /// socket, it would consume it and fail the live job.
+    #[tokio::test]
+    async fn abandoned_job_is_skipped_without_touching_the_socket() {
+        let path = temp_socket_path("abandoned-job");
+        let server = spawn_scripted_fake_sozu(&path, vec![ok_response()]);
+
+        let handle = SozuAgentHandle::spawn(path.to_str().expect("utf-8 path")).expect("spawn");
+        // Queue a job that is abandoned before the worker picks it up.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        drop(reply_rx);
+        handle
+            .tx
+            .send(Job::QueryMetrics(QueryMetricsOptions::default(), reply_tx))
+            .expect("queue the abandoned job");
+        // The live job queued behind it must be the only thing on the wire.
+        let live: Request = RequestType::Status(Status {}).into();
+        handle
+            .apply(vec![live.clone()])
+            .await
+            .expect("the live job must succeed on the single scripted response");
+        drop(handle);
+
+        let received = server.join().expect("fake sozu thread");
+        assert_eq!(
+            received,
+            vec![live],
+            "only the live job may reach the socket"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
