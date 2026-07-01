@@ -34,8 +34,8 @@ use sozu_gw_gateway_api::httproute::{
 use sozu_gw_ir as ir;
 
 use crate::{
-    add_service_route, extract_cert, meta_nn, BuildConfig, FingerprintedCert, Index, Inputs,
-    PortRef, Problem,
+    add_service_route, extract_cert, meta_nn, BuildConfig, FingerprintedCert, FrontendSource,
+    Index, Inputs, PortRef, Problem, SourcedFrontend,
 };
 
 const GW_GROUP: &str = "gateway.networking.k8s.io";
@@ -75,11 +75,15 @@ pub struct ListenerStatus {
     pub resolved_refs_reason: &'static str,
 }
 
-/// Status of one `HTTPRoute` for a single parent Gateway.
+/// Status of one `HTTPRoute` for a single parentRef. The parentRef's
+/// `sectionName`/`port` are part of its identity — a route may carry several
+/// parentRefs to the same Gateway, each with its own result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RouteParentResult {
     pub gateway_namespace: String,
     pub gateway_name: String,
+    pub section_name: Option<String>,
+    pub port: Option<i32>,
     pub accepted: bool,
     /// Gateway API `Accepted` condition reason (e.g. `Accepted`, `NoMatchingParent`).
     pub accepted_reason: &'static str,
@@ -258,7 +262,7 @@ pub(crate) fn build_gateway(
     index: &Index,
     clusters: &mut BTreeMap<String, ir::Cluster>,
     backends: &mut BTreeMap<String, ir::Backend>,
-    frontends: &mut Vec<ir::Frontend>,
+    frontends: &mut Vec<SourcedFrontend>,
     certificates: &mut Vec<FingerprintedCert>,
 ) -> GatewayBuildResults {
     // 1. GatewayClasses we own (controllerName matches).
@@ -348,6 +352,16 @@ pub(crate) fn build_gateway(
             } else if candidates.is_empty() {
                 (false, "NotAllowedByListeners")
             } else {
+                // Attribute this rule's frontends to the (route, parent) pair
+                // so a route-key collision can be reported on its result.
+                let source = FrontendSource::HttpRoute {
+                    namespace: rns.clone(),
+                    name: rname.clone(),
+                    gateway_namespace: gw_ns.clone(),
+                    gateway_name: pref.name.clone(),
+                    section_name: pref.section_name.clone(),
+                    port: pref.port,
+                };
                 for rule in route.spec.rules.iter().flatten() {
                     attach_rule(
                         cfg,
@@ -360,6 +374,7 @@ pub(crate) fn build_gateway(
                         route.spec.hostnames.as_deref(),
                         &candidates,
                         rule,
+                        &source,
                         &mut problems,
                         &mut resolved_refs,
                         &mut resolved_refs_reason,
@@ -381,6 +396,8 @@ pub(crate) fn build_gateway(
             parents.push(RouteParentResult {
                 gateway_namespace: gw_ns,
                 gateway_name: pref.name.clone(),
+                section_name: pref.section_name.clone(),
+                port: pref.port,
                 accepted,
                 accepted_reason,
                 resolved_refs,
@@ -537,11 +554,12 @@ fn attach_rule(
     index: &Index,
     clusters: &mut BTreeMap<String, ir::Cluster>,
     backends: &mut BTreeMap<String, ir::Backend>,
-    frontends: &mut Vec<ir::Frontend>,
+    frontends: &mut Vec<SourcedFrontend>,
     route_ns: &str,
     route_hostnames: Option<&[String]>,
     candidates: &[&ListenerInfo],
     rule: &sozu_gw_gateway_api::httproute::HttpRouteRules,
+    source: &FrontendSource,
     problems: &mut Vec<Problem>,
     resolved_refs: &mut bool,
     resolved_refs_reason: &mut &'static str,
@@ -668,18 +686,21 @@ fn attach_rule(
                 continue;
             }
             for hostname in hosts {
-                frontends.push(ir::Frontend {
-                    hostname,
-                    path: path.clone(),
-                    method: method.clone(),
-                    cluster_id: cluster_id.clone(),
-                    tls: l.https,
-                    filters: filters.clone(),
-                    listener: if l.https {
-                        cfg.https_listener
-                    } else {
-                        cfg.http_listener
+                frontends.push(SourcedFrontend {
+                    frontend: ir::Frontend {
+                        hostname,
+                        path: path.clone(),
+                        method: method.clone(),
+                        cluster_id: cluster_id.clone(),
+                        tls: l.https,
+                        filters: filters.clone(),
+                        listener: if l.https {
+                            cfg.https_listener
+                        } else {
+                            cfg.http_listener
+                        },
                     },
+                    source: source.clone(),
                 });
             }
         }

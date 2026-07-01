@@ -83,23 +83,57 @@ pub struct Inputs {
 /// non-fatal problems still let the rest of the Ingress translate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Problem {
-    SecretNotFound { secret: String },
+    SecretNotFound {
+        secret: String,
+    },
     TlsEntryWithoutSecret,
-    InvalidCertificate { secret: String, reason: String },
+    InvalidCertificate {
+        secret: String,
+        reason: String,
+    },
     NonServiceBackend,
-    ServiceNotFound { service: String },
-    ServicePortNotFound { service: String, port: String },
-    NoReadyEndpoints { service: String },
+    ServiceNotFound {
+        service: String,
+    },
+    ServicePortNotFound {
+        service: String,
+        port: String,
+    },
+    NoReadyEndpoints {
+        service: String,
+    },
+    /// Another object already claims this exact route key (listener + host +
+    /// path + method) with a different effect. This route is dropped — never
+    /// silently applied on top — in favour of `winner` (a cluster id, or
+    /// `"<redirect>"` for a cluster-less redirect frontend). Applies to
+    /// Ingress and Gateway API routes alike.
+    RouteCollision {
+        hostname: String,
+        path: String,
+        winner: String,
+    },
     // Gateway API (Phase 2) — features Sōzu or this phase does not cover yet.
-    UnsupportedTlsMode { mode: String },
-    UnsupportedProtocol { protocol: String },
+    UnsupportedTlsMode {
+        mode: String,
+    },
+    UnsupportedProtocol {
+        protocol: String,
+    },
     WeightedBackendsUnsupported,
     HeaderOrQueryMatchUnsupported,
-    FilterUnsupported { kind: String },
-    BackendRefNotPermitted { reference: String },
+    FilterUnsupported {
+        kind: String,
+    },
+    BackendRefNotPermitted {
+        reference: String,
+    },
     // L4 (TCP/UDP) services.
-    InvalidL4Mapping { entry: String },
-    L4PortReserved { port: u16 },
+    InvalidL4Mapping {
+        entry: String,
+    },
+    L4PortReserved {
+        port: u16,
+    },
 }
 
 /// Result of one L4 (TCP/UDP) port mapping, for status/logging.
@@ -473,6 +507,112 @@ pub(crate) fn add_service_route(
     Ok((cluster_id, !addrs.is_empty()))
 }
 
+/// Where an HTTP(S) frontend came from, so a route-key collision can be
+/// reported on the losing object's own result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FrontendSource {
+    Ingress {
+        namespace: String,
+        name: String,
+    },
+    /// An HTTPRoute rule, attributed to one (route, parentRef) pair —
+    /// collision problems land on that parent's [`RouteParentResult`]. The
+    /// parentRef's `sectionName`/`port` are part of the identity: a route may
+    /// carry several parentRefs to the *same* Gateway, and the collision must
+    /// land on the one that produced the losing frontend.
+    HttpRoute {
+        namespace: String,
+        name: String,
+        gateway_namespace: String,
+        gateway_name: String,
+        section_name: Option<String>,
+        port: Option<i32>,
+    },
+}
+
+/// An IR frontend paired with its source, carried until collision resolution.
+pub(crate) struct SourcedFrontend {
+    pub(crate) frontend: ir::Frontend,
+    pub(crate) source: FrontendSource,
+}
+
+/// Mirror of Sōzu's route key: the listener a frontend binds to (`tls` picks
+/// the HTTPS vs HTTP listener), hostname, path match, optional method. The
+/// target cluster is *not* part of the key.
+type RouteKey = (bool, SocketAddr, String, ir::PathMatch, Option<String>);
+
+/// The raw path value of a match, for problem context.
+fn path_value(p: &ir::PathMatch) -> &str {
+    match p {
+        ir::PathMatch::Prefix(v) | ir::PathMatch::Exact(v) | ir::PathMatch::Regex(v) => v,
+    }
+}
+
+/// Keep exactly one frontend per Sōzu route key and report the losers.
+///
+/// Sōzu keys a route by `address;hostname;path[;method]` — the cluster is NOT
+/// part of the key — so two frontends sharing a key cannot coexist. The
+/// translator already dedups on that key, first occurrence wins, over the
+/// builder's `(tls, hostname, cluster_id)` ordering; the winner kept here
+/// replicates exactly that (smallest by the sort, a cluster-less redirect —
+/// `None` — ordering before any cluster id), so reporting the collision does
+/// not change observable routing. A future improvement could prefer
+/// oldest-object-wins instead. Byte-identical duplicates (same target
+/// cluster, same filters) are benign overlaps — Sōzu would apply either one
+/// with the same effect — and stay unreported; a loser with a *different*
+/// effect gets a [`Problem::RouteCollision`] attributed to its source.
+fn resolve_frontend_collisions(
+    mut frontends: Vec<SourcedFrontend>,
+) -> (Vec<ir::Frontend>, Vec<(FrontendSource, Problem)>) {
+    // Stable sort: ties keep emission order, like the previous IR ordering.
+    frontends.sort_by(|a, b| {
+        (a.frontend.tls, &a.frontend.hostname, &a.frontend.cluster_id).cmp(&(
+            b.frontend.tls,
+            &b.frontend.hostname,
+            &b.frontend.cluster_id,
+        ))
+    });
+
+    let mut kept: Vec<ir::Frontend> = Vec::new();
+    let mut winners: BTreeMap<RouteKey, usize> = BTreeMap::new();
+    let mut collisions: Vec<(FrontendSource, Problem)> = Vec::new();
+    for sf in frontends {
+        let key: RouteKey = (
+            sf.frontend.tls,
+            sf.frontend.listener,
+            sf.frontend.hostname.clone(),
+            sf.frontend.path.clone(),
+            sf.frontend.method.clone(),
+        );
+        match winners.get(&key) {
+            None => {
+                winners.insert(key, kept.len());
+                kept.push(sf.frontend);
+            }
+            Some(&i) => {
+                let winner = &kept[i];
+                if winner.cluster_id == sf.frontend.cluster_id
+                    && winner.filters == sf.frontend.filters
+                {
+                    continue; // benign duplicate: same route, same effect
+                }
+                collisions.push((
+                    sf.source,
+                    Problem::RouteCollision {
+                        hostname: sf.frontend.hostname.clone(),
+                        path: path_value(&sf.frontend.path).to_string(),
+                        winner: winner
+                            .cluster_id
+                            .clone()
+                            .unwrap_or_else(|| "<redirect>".to_string()),
+                    },
+                ));
+            }
+        }
+    }
+    (kept, collisions)
+}
+
 /// An IR certificate paired with its leaf fingerprint (SHA-256 of the DER, as
 /// computed by [`extract_cert`]) — Sōzu's identity for a loaded certificate.
 /// Carried until [`merge_certificates`] so the merge keys on the DER identity,
@@ -598,7 +738,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
 
     let mut clusters: BTreeMap<String, ir::Cluster> = BTreeMap::new();
     let mut backends: BTreeMap<String, ir::Backend> = BTreeMap::new();
-    let mut frontends: Vec<ir::Frontend> = Vec::new();
+    let mut frontends: Vec<SourcedFrontend> = Vec::new();
     let mut certificates: Vec<FingerprintedCert> = Vec::new();
     let mut results: Vec<IngressResult> = Vec::new();
 
@@ -616,6 +756,11 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                 problems,
             });
             continue;
+        };
+
+        let source = FrontendSource::Ingress {
+            namespace: namespace.clone(),
+            name: name.clone(),
         };
 
         // Automatic HTTP→HTTPS redirect: on by default, opt out per Ingress.
@@ -723,24 +868,30 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                         } else {
                             ir::FrontendFilters::default()
                         };
-                        frontends.push(ir::Frontend {
-                            hostname: host.clone(),
-                            path: pm.clone(),
-                            method: None,
-                            cluster_id: Some(cluster_id.clone()),
-                            tls: false,
-                            listener: cfg.http_listener,
-                            filters: http_filters,
+                        frontends.push(SourcedFrontend {
+                            frontend: ir::Frontend {
+                                hostname: host.clone(),
+                                path: pm.clone(),
+                                method: None,
+                                cluster_id: Some(cluster_id.clone()),
+                                tls: false,
+                                listener: cfg.http_listener,
+                                filters: http_filters,
+                            },
+                            source: source.clone(),
                         });
                         if host_has_tls {
-                            frontends.push(ir::Frontend {
-                                hostname: host.clone(),
-                                path: pm,
-                                method: None,
-                                cluster_id: Some(cluster_id),
-                                tls: true,
-                                listener: cfg.https_listener,
-                                filters: ir::FrontendFilters::default(),
+                            frontends.push(SourcedFrontend {
+                                frontend: ir::Frontend {
+                                    hostname: host.clone(),
+                                    path: pm,
+                                    method: None,
+                                    cluster_id: Some(cluster_id),
+                                    tls: true,
+                                    listener: cfg.https_listener,
+                                    filters: ir::FrontendFilters::default(),
+                                },
+                                source: source.clone(),
                             });
                         }
                     }
@@ -757,7 +908,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
     }
 
     // Gateway API (Phase 2): same accumulators, same IR.
-    let gw = gateway::build_gateway(
+    let mut gw = gateway::build_gateway(
         cfg,
         inputs,
         &index,
@@ -767,10 +918,64 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         &mut certificates,
     );
 
-    // Deterministic frontend ordering (the Translator re-canonicalises anyway).
-    frontends.sort_by(|a, b| {
-        (a.tls, &a.hostname, &a.cluster_id).cmp(&(b.tls, &b.hostname, &b.cluster_id))
-    });
+    // Deterministic frontend ordering (the Translator re-canonicalises anyway)
+    // + one frontend per Sōzu route key: a route-key collision with a
+    // different effect is reported on the losing owner's result instead of
+    // silently letting the winner steal the traffic.
+    let (frontends, collisions) = resolve_frontend_collisions(frontends);
+    for (source, problem) in collisions {
+        // Dedup: the HTTP and HTTPS frontends of one host+path lose as a pair
+        // to the same winner — one problem carries the same information.
+        match source {
+            // No Ingress status machinery exists, so a losing Ingress keeps
+            // problem-only reporting.
+            FrontendSource::Ingress { namespace, name } => {
+                if let Some(r) = results
+                    .iter_mut()
+                    .find(|r| r.namespace == namespace && r.name == name)
+                {
+                    if !r.problems.contains(&problem) {
+                        r.problems.push(problem);
+                    }
+                }
+            }
+            FrontendSource::HttpRoute {
+                namespace,
+                name,
+                gateway_namespace,
+                gateway_name,
+                section_name,
+                port,
+            } => {
+                if let Some(p) = gw
+                    .routes
+                    .iter_mut()
+                    .find(|r| r.namespace == namespace && r.name == name)
+                    .and_then(|r| {
+                        // The parentRef identity includes sectionName/port: a
+                        // route may hold several parentRefs to one Gateway,
+                        // and the loser must be the parent that produced the
+                        // colliding frontend, not the first match.
+                        r.parents.iter_mut().find(|p| {
+                            p.gateway_namespace == gateway_namespace
+                                && p.gateway_name == gateway_name
+                                && p.section_name == section_name
+                                && p.port == port
+                        })
+                    })
+                {
+                    // A losing route must not read fully healthy: downgrade
+                    // Accepted with an implementation-specific reason so the
+                    // condition (not just the log) carries the collision.
+                    p.accepted = false;
+                    p.accepted_reason = "RouteCollision";
+                    if !p.problems.contains(&problem) {
+                        p.problems.push(problem);
+                    }
+                }
+            }
+        }
+    }
 
     // Merge certs that share Sōzu's (listener, fingerprint) identity, unioning
     // their names, then order deterministically. This subsumes exact-duplicate
