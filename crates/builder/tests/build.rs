@@ -591,6 +591,110 @@ fn same_der_cert_with_different_pem_wrapping_is_merged() {
     );
 }
 
+/// Service `web` + ready EndpointSlice in an arbitrary namespace.
+fn web_service_in(ns: &str) -> (Service, EndpointSlice) {
+    let svc = from_json(json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": { "name": "web", "namespace": ns },
+        "spec": { "ports": [{ "name": "http", "port": 80, "targetPort": 8080 }] }
+    }));
+    let slice = from_json(json!({
+        "apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice",
+        "metadata": { "name": "web-abc", "namespace": ns,
+            "labels": { "kubernetes.io/service-name": "web" } },
+        "addressType": "IPv4",
+        "ports": [{ "name": "http", "port": 8080 }],
+        "endpoints": [{ "addresses": ["10.244.0.5"], "conditions": { "ready": true } }]
+    }));
+    (svc, slice)
+}
+
+/// Plain-HTTP Ingress `<ns>/<name>` routing `host` `/` to `<ns>/web:80`.
+fn plain_ingress(ns: &str, name: &str, host: &str) -> Ingress {
+    from_json(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": { "name": name, "namespace": ns },
+        "spec": {
+            "ingressClassName": "sozu",
+            "rules": [{
+                "host": host,
+                "http": { "paths": [
+                    { "path": "/", "pathType": "Prefix",
+                      "backend": { "service": { "name": "web", "port": { "number": 80 } } } }
+                ]}
+            }]
+        }
+    }))
+}
+
+#[test]
+fn cross_namespace_host_path_collision_is_reported_on_the_loser() {
+    // Two Ingresses in different namespaces claim the same host+path with
+    // different Services. Sōzu keys the route by host+path (not by cluster),
+    // so only one can win — the winner must be the one the translator's dedup
+    // already kept (smallest cluster id), and the loser must SEE the theft
+    // instead of both owners reading accepted-with-no-problems.
+    let (svc_a, slice_a) = web_service_in("aaa");
+    let (svc_b, slice_b) = web_service_in("bbb");
+    let inputs = Inputs {
+        ingresses: vec![
+            plain_ingress("bbb", "web", "clash.example.com"),
+            plain_ingress("aaa", "web", "clash.example.com"),
+        ],
+        services: vec![svc_a, svc_b],
+        endpointslices: vec![slice_a, slice_b],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1, "one frontend per route key");
+    assert_eq!(
+        out.ir.frontends[0].cluster_id.as_deref(),
+        Some("aaa.web.80"),
+        "the translator's winner (smallest cluster id) is kept"
+    );
+    let winner = out
+        .results
+        .iter()
+        .find(|r| r.namespace == "aaa")
+        .expect("aaa result");
+    assert!(winner.problems.is_empty(), "{winner:?}");
+    let loser = out
+        .results
+        .iter()
+        .find(|r| r.namespace == "bbb")
+        .expect("bbb result");
+    assert_eq!(
+        loser.problems,
+        vec![Problem::RouteCollision {
+            hostname: "clash.example.com".to_string(),
+            path: "/".to_string(),
+            winner: "aaa.web.80".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn identical_duplicate_routes_are_benign_and_unreported() {
+    // Two Ingresses claiming the same host+path with the SAME Service and the
+    // same filters are a harmless overlap: one frontend, zero problems.
+    let inputs = Inputs {
+        ingresses: vec![
+            plain_ingress("demo", "ing-a", "app.example.com"),
+            plain_ingress("demo", "ing-b", "app.example.com"),
+        ],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1, "deduped to one frontend");
+    for r in &out.results {
+        assert!(r.problems.is_empty(), "{r:?}");
+    }
+}
+
 #[test]
 fn tcp_services_configmap_maps_to_l4_frontend() {
     let cm: ConfigMap = from_json(json!({

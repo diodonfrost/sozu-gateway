@@ -302,6 +302,191 @@ fn redirect_filter_supported_and_unsupported_reported() {
 }
 
 #[test]
+fn ingress_colliding_with_redirect_only_route_reports_the_ingress() {
+    // A redirect-only HTTPRoute (cluster-less frontend) and an Ingress claim
+    // the same host+path. The translator's dedup orders a cluster-less
+    // frontend (None) before any cluster id, so the redirect wins; the losing
+    // Ingress owner must see the collision.
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "redirect", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{
+                "filters": [
+                    { "type": "RequestRedirect",
+                      "requestRedirect": { "scheme": "https", "statusCode": 301 } }
+                ]
+            }]
+        }
+    }));
+    let ingress: Ingress = from_json(json!({
+        "metadata": { "name": "web", "namespace": "demo" },
+        "spec": { "ingressClassName": "sozu", "rules": [{
+            "host": "app.example.com",
+            "http": { "paths": [{ "path": "/", "pathType": "Prefix",
+                "backend": { "service": { "name": "web", "port": { "number": 80 } } } }] }
+        }]}
+    }));
+    let inputs = Inputs {
+        ingresses: vec![ingress],
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![http_gateway()],
+        http_routes: vec![route],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1, "one frontend per route key");
+    assert!(
+        out.ir.frontends[0].cluster_id.is_none(),
+        "the redirect-only frontend wins"
+    );
+    assert_eq!(
+        out.results[0].problems,
+        vec![Problem::RouteCollision {
+            hostname: "app.example.com".to_string(),
+            path: "/".to_string(),
+            winner: "<redirect>".to_string(),
+        }],
+        "the losing Ingress carries the collision"
+    );
+    assert!(
+        out.routes[0].parents[0].problems.is_empty(),
+        "the winning route stays clean"
+    );
+}
+
+#[test]
+fn losing_route_parent_is_not_accepted_with_route_collision_reason() {
+    // Two HTTPRoutes claim app.example.com "/": the redirect-only route wins
+    // (a cluster-less frontend orders before any cluster id) and the backend
+    // route loses. The loser's parent must not read fully healthy: its
+    // Accepted condition downgrades with the implementation-specific
+    // RouteCollision reason, so kubectl shows the collision, not just a log.
+    let redirect: HttpRoute = from_json(json!({
+        "metadata": { "name": "redirect", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{
+                "filters": [
+                    { "type": "RequestRedirect",
+                      "requestRedirect": { "scheme": "https", "statusCode": 301 } }
+                ]
+            }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![http_gateway()],
+        http_routes: vec![route_to_web(false), redirect],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1, "one frontend per route key");
+    assert!(out.ir.frontends[0].cluster_id.is_none(), "redirect wins");
+    let loser = out
+        .routes
+        .iter()
+        .find(|r| r.name == "route")
+        .expect("losing route present");
+    let p = &loser.parents[0];
+    assert!(!p.accepted, "the losing parent must not read accepted");
+    assert_eq!(p.accepted_reason, "RouteCollision");
+    assert!(p.problems.contains(&Problem::RouteCollision {
+        hostname: "app.example.com".to_string(),
+        path: "/".to_string(),
+        winner: "<redirect>".to_string(),
+    }));
+    let winner = out
+        .routes
+        .iter()
+        .find(|r| r.name == "redirect")
+        .expect("winning route present");
+    assert!(winner.parents[0].accepted, "the winner stays clean");
+    assert!(winner.parents[0].problems.is_empty());
+}
+
+#[test]
+fn collision_lands_on_the_parent_ref_that_produced_the_frontend() {
+    // One route, TWO parentRefs to the SAME Gateway distinguished only by
+    // sectionName. Only the frontend produced via listener "b" collides; the
+    // attribution must key on the full parentRef identity (sectionName), not
+    // stop at the first (gateway_namespace, gateway_name) match.
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "a", "protocol": "HTTP", "port": 80, "hostname": "a.example.com" },
+            { "name": "b", "protocol": "HTTP", "port": 80, "hostname": "b.example.com" }
+        ]}
+    }));
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [
+                { "name": "gw", "sectionName": "a" },
+                { "name": "gw", "sectionName": "b" }
+            ],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+        }
+    }));
+    // Redirect-only route pinned to b.example.com: wins that key only.
+    let redirect: HttpRoute = from_json(json!({
+        "metadata": { "name": "redirect", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw", "sectionName": "b" }],
+            "hostnames": ["b.example.com"],
+            "rules": [{
+                "filters": [
+                    { "type": "RequestRedirect",
+                      "requestRedirect": { "scheme": "https", "statusCode": 301 } }
+                ]
+            }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        http_routes: vec![route, redirect],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    let r = out.routes.iter().find(|r| r.name == "route").unwrap();
+    assert_eq!(r.parents.len(), 2);
+    let parent_a = r
+        .parents
+        .iter()
+        .find(|p| p.section_name.as_deref() == Some("a"))
+        .unwrap();
+    assert!(parent_a.accepted, "listener a did not collide");
+    assert!(parent_a.problems.is_empty());
+    let parent_b = r
+        .parents
+        .iter()
+        .find(|p| p.section_name.as_deref() == Some("b"))
+        .unwrap();
+    assert!(
+        !parent_b.accepted,
+        "the collision is on listener b's parent"
+    );
+    assert_eq!(parent_b.accepted_reason, "RouteCollision");
+    assert!(parent_b.problems.contains(&Problem::RouteCollision {
+        hostname: "b.example.com".to_string(),
+        path: "/".to_string(),
+        winner: "<redirect>".to_string(),
+    }));
+}
+
+#[test]
 fn gateway_and_ingress_share_one_cluster() {
     let ingress: Ingress = from_json(json!({
         "metadata": { "name": "web", "namespace": "demo" },
