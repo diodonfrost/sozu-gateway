@@ -173,18 +173,44 @@ fn state_dump_is_nonempty(dump: &str) -> bool {
 }
 
 /// Persist the shadow. Best-effort: a write failure must never fail a reconcile.
+///
+/// Written atomically — temp file in the same directory, `sync_all`, then
+/// `rename` over the target — so a crash mid-write can never leave a truncated
+/// JSON behind. A torn shadow would parse-fail on restart and fall back to a
+/// full re-apply against a Sōzu that still holds state, which is exactly the
+/// divergence this file exists to avoid.
 pub fn persist(shadow_file: &str, shadow: &Ir) {
     if shadow_file.is_empty() {
         return;
     }
-    match serde_json::to_vec(shadow) {
-        Ok(bytes) => {
-            if let Err(e) = std::fs::write(shadow_file, bytes) {
-                warn!(error = %e, file = %shadow_file, "failed to persist shadow");
-            }
+    let bytes = match serde_json::to_vec(shadow) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            warn!(error = %e, "failed to serialize shadow");
+            return;
         }
-        Err(e) => warn!(error = %e, "failed to serialize shadow"),
+    };
+    // A predictable sibling name is fine: the directory is a private shared
+    // volume and only one controller writes there.
+    let tmp_file = format!("{shadow_file}.tmp");
+    if let Err(e) = write_atomically(shadow_file, &tmp_file, &bytes) {
+        warn!(error = %e, file = %shadow_file, "failed to persist shadow");
+        // Best-effort cleanup so a failed attempt leaves no stale temp behind.
+        let _ = std::fs::remove_file(&tmp_file);
     }
+}
+
+/// Write `bytes` to `tmp_file`, fsync it, then rename it over `target` (an
+/// atomic replace on the same filesystem — the volume the temp name shares).
+fn write_atomically(target: &str, tmp_file: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(tmp_file)?;
+    file.write_all(bytes)?;
+    // Flush to disk before the rename, so the rename can never publish a file
+    // whose content is still only in the page cache.
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(tmp_file, target)
 }
 
 #[cfg(test)]
@@ -267,6 +293,45 @@ mod tests {
         let missing =
             std::env::temp_dir().join(format!("sozu-gw-nonexistent-{}.probe", std::process::id()));
         assert!(read_state_dump(missing.to_str().expect("utf-8 path")).is_err());
+    }
+
+    #[test]
+    fn persist_replaces_an_existing_file_and_leaves_no_temp_behind() {
+        let file = std::env::temp_dir().join(format!(
+            "sozu-gw-shadow-persist-{}.json",
+            std::process::id()
+        ));
+        let path = file.to_str().expect("utf-8 temp path");
+        let tmp = format!("{path}.tmp");
+
+        // An existing baseline from a previous apply, plus a stale temp file
+        // from a hypothetical earlier crash: persist must replace the former
+        // and consume the latter.
+        std::fs::write(&file, b"{not even json").expect("seed old shadow");
+        std::fs::write(&tmp, b"stale").expect("seed stale temp");
+
+        let ir = Ir {
+            clusters: vec![sozu_gw_ir::Cluster {
+                id: "demo.web.80".into(),
+                load_balancing: sozu_gw_ir::LbAlgorithm::default(),
+                sticky_session: false,
+                https_redirect: true,
+                max_connections_per_ip: None,
+                retry_after: None,
+            }],
+            ..Default::default()
+        };
+        persist(path, &ir);
+
+        let raw = std::fs::read_to_string(&file).expect("shadow file present");
+        let back: Ir = serde_json::from_str(&raw).expect("persisted shadow parses");
+        assert_eq!(back, ir, "the target must hold exactly the new shadow");
+        assert!(
+            !std::path::Path::new(&tmp).exists(),
+            "the temp file must be renamed away, never left behind"
+        );
+
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]
