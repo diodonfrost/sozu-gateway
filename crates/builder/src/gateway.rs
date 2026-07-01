@@ -842,8 +842,20 @@ fn wildcard_covers(wildcard: &str, host: &str) -> bool {
     })
 }
 
-fn hosts_compatible(a: &str, b: &str) -> bool {
-    a == b || wildcard_covers(a, b) || wildcard_covers(b, a)
+/// The intersection of a route hostname and a listener hostname: the MORE
+/// SPECIFIC of the two when they are compatible (`None` otherwise). When one
+/// side is a wildcard covering the other, the covered — narrower — name *is*
+/// the intersection: programming the route's own string when the listener is
+/// the narrower side would emit a wildcard frontend and route hostnames the
+/// listener never admits (the Gateway API intersects, it doesn't widen).
+fn host_intersection(route: &str, listener: &str) -> Option<String> {
+    if route == listener || wildcard_covers(listener, route) {
+        Some(route.to_string())
+    } else if wildcard_covers(route, listener) {
+        Some(listener.to_string())
+    } else {
+        None
+    }
 }
 
 /// The hostnames a route serves on a listener: the route's hostnames intersected
@@ -854,8 +866,7 @@ fn effective_hostnames(route: Option<&[String]>, listener: Option<&str>) -> Vec<
     match (route, listener) {
         (Some(routes), Some(l)) => routes
             .iter()
-            .filter(|h| hosts_compatible(h, l))
-            .cloned()
+            .filter_map(|h| host_intersection(h, l))
             .collect(),
         (Some(routes), None) => routes.to_vec(),
         (None, Some(l)) => vec![l.to_string()],
@@ -890,4 +901,44 @@ fn reference_granted(
                     && t.name.as_deref().is_none_or(|n| n == to_name)
             })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{host_intersection, wildcard_covers};
+
+    #[test]
+    fn wildcard_covers_exactly_one_extra_label() {
+        assert!(wildcard_covers("*.example.com", "a.example.com"));
+        assert!(!wildcard_covers("*.example.com", "a.b.example.com"));
+        assert!(!wildcard_covers("*.example.com", "example.com"));
+        // Not a suffix-string match: `notexample.com` must not count.
+        assert!(!wildcard_covers("*.example.com", "a.notexample.com"));
+        // Only `*.`-prefixed patterns are wildcards; a bare `*` (the builder's
+        // catch-all spelling, not representable as a Gateway hostname) is not.
+        assert!(!wildcard_covers("*", "example.com"));
+        assert!(!wildcard_covers("a.example.com", "a.example.com"));
+    }
+
+    #[test]
+    fn host_intersection_picks_the_more_specific_name() {
+        // Equal → either.
+        assert_eq!(
+            host_intersection("app.example.com", "app.example.com").as_deref(),
+            Some("app.example.com")
+        );
+        // Wildcard route × specific listener → the listener (narrower) wins.
+        assert_eq!(
+            host_intersection("*.example.com", "test.example.com").as_deref(),
+            Some("test.example.com")
+        );
+        // Specific route × wildcard listener → the route (narrower) wins.
+        assert_eq!(
+            host_intersection("test.example.com", "*.example.com").as_deref(),
+            Some("test.example.com")
+        );
+        // Incompatible → empty intersection.
+        assert_eq!(host_intersection("a.example.com", "b.example.com"), None);
+        assert_eq!(host_intersection("*.example.com", "example.com"), None);
+    }
 }

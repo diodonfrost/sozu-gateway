@@ -581,6 +581,91 @@ fn route_hostname_not_matching_listener_is_silently_skipped() {
     assert!(out.routes[0].parents[0].problems.is_empty());
 }
 
+#[test]
+fn wildcard_route_on_specific_listener_narrows_to_the_listener_hostname() {
+    // Listener pinned to test.example.com; route hostname *.example.com. The
+    // Gateway API intersects the two: only test.example.com may be served, so
+    // the frontend must carry the listener's (more specific) hostname — a
+    // *.example.com frontend would also route other.example.com, which this
+    // listener never admits.
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "http", "protocol": "HTTP", "port": 80, "hostname": "test.example.com" }
+        ]}
+    }));
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["*.example.com"],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        http_routes: vec![route],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1);
+    assert_eq!(out.ir.frontends[0].hostname, "test.example.com");
+    assert!(out.routes[0].parents[0].accepted);
+}
+
+#[test]
+fn specific_route_on_wildcard_listener_uses_the_route_hostname() {
+    // Listener *.example.com; route pinned to test.example.com: the route's
+    // (more specific) hostname is the intersection and must be programmed.
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "http", "protocol": "HTTP", "port": 80, "hostname": "*.example.com" }
+        ]}
+    }));
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["test.example.com"],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        http_routes: vec![route],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1);
+    assert_eq!(out.ir.frontends[0].hostname, "test.example.com");
+}
+
+#[test]
+fn equal_route_and_listener_hostname_is_programmed_unchanged() {
+    // https_gateway() pins app.example.com; the route serves the same name.
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![https_gateway()],
+        http_routes: vec![route_to_web(false)],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        secrets: vec![tls_secret()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert_eq!(out.ir.frontends.len(), 1);
+    assert_eq!(out.ir.frontends[0].hostname, "app.example.com");
+}
+
 fn inputs_with(route: HttpRoute) -> Inputs {
     Inputs {
         gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
