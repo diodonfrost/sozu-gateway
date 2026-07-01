@@ -7,6 +7,8 @@
 use std::net::SocketAddr;
 
 use sozu_command_lib::proto::command::request::RequestType;
+use sozu_command_lib::proto::command::LoadBalancingParams;
+use sozu_command_lib::state::ConfigState;
 use sozu_gw_ir as ir;
 use sozu_gw_translator as tr;
 
@@ -158,6 +160,54 @@ fn reconcile_scale_down_emits_single_remove_backend() {
     let reqs = tr::reconcile(&sample_ir(), &after).expect("reconcile");
     assert_eq!(reqs.len(), 1, "scale-down should be exactly one request");
     insta::assert_json_snapshot!(reqs);
+}
+
+#[test]
+fn reconcile_weight_change_keeps_backend_alive() {
+    // ConfigState::diff emits a changed backend (same cluster/backend/address,
+    // new weight) as Remove-then-Add, and canonicalize reorders adds before
+    // backend removes. Sōzu's add_backend is an upsert and remove_backend
+    // matches on (backend_id, address), so a surviving Remove would delete the
+    // backend the Add just updated — it must be dropped, not just reordered.
+    let before = sample_ir();
+    let mut after = sample_ir();
+    for b in &mut after.backends {
+        if b.cluster_id == "api" {
+            b.weight = Some(7); // was Some(5)
+        }
+    }
+    let reqs = tr::reconcile(&before, &after).expect("reconcile");
+
+    assert!(
+        reqs.iter().any(|r| matches!(
+            &r.request_type,
+            Some(RequestType::AddBackend(b))
+                if b.cluster_id == "api"
+                    && b.load_balancing_parameters == Some(LoadBalancingParams { weight: 7 })
+        )),
+        "the weight change must arrive as an AddBackend upsert: {reqs:#?}"
+    );
+    assert!(
+        !reqs
+            .iter()
+            .any(|r| matches!(r.request_type, Some(RequestType::RemoveBackend(_)))),
+        "no RemoveBackend may accompany the upsert (it would delete the backend): {reqs:#?}"
+    );
+    assert_eq!(reqs.len(), 1, "a weight change is exactly one request");
+
+    // Replay onto Sōzu's own state model, seeded with the before-state: the
+    // backend must survive the batch and carry the new weight.
+    let mut state = ConfigState::new();
+    for req in tr::ir_to_requests(&before).iter().chain(reqs.iter()) {
+        state.dispatch(req).expect("dispatch");
+    }
+    let api = state.backends.get("api").expect("api cluster backends");
+    assert_eq!(api.len(), 1, "the api cluster must keep its backend");
+    assert_eq!(
+        api[0].load_balancing_parameters,
+        Some(LoadBalancingParams { weight: 7 }),
+        "the surviving backend must carry the new weight"
+    );
 }
 
 #[test]

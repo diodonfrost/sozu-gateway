@@ -379,6 +379,46 @@ fn canonicalize(mut requests: Vec<Request>) -> Vec<Request> {
     requests
 }
 
+/// Drop every `RemoveBackend` whose (cluster_id, backend_id, address) triple
+/// also appears as an `AddBackend` in the same batch.
+///
+/// `ConfigState::diff` emits a *changed* backend (same key, e.g. a new weight)
+/// as Remove-then-Add, but `canonicalize` reorders backend adds (tier 3) before
+/// backend removes (tier 7), turning that pair into Add-then-Remove. Sōzu's
+/// `add_backend` is an upsert and `remove_backend` matches on
+/// (backend_id, address) only, so the trailing Remove would delete the backend
+/// the Add just updated — leaving the cluster short one live backend. The Add
+/// alone already converges, so the Remove is the stale half of the pair and is
+/// dropped. A backend whose *address* changed diffs under two different triples
+/// and keeps its Remove.
+fn drop_superseded_backend_removes(requests: Vec<Request>) -> Vec<Request> {
+    let added: BTreeSet<(String, String, SocketAddr)> = requests
+        .iter()
+        .filter_map(|req| match &req.request_type {
+            Some(RequestType::AddBackend(b)) => Some((
+                b.cluster_id.clone(),
+                b.backend_id.clone(),
+                b.address.into(),
+            )),
+            _ => None,
+        })
+        .collect();
+    if added.is_empty() {
+        return requests;
+    }
+    requests
+        .into_iter()
+        .filter(|req| match &req.request_type {
+            Some(RequestType::RemoveBackend(b)) => !added.contains(&(
+                b.cluster_id.clone(),
+                b.backend_id.clone(),
+                b.address.into(),
+            )),
+            _ => true,
+        })
+        .collect()
+}
+
 // ----------------------------------------------------------------------------
 // Diff building blocks
 // ----------------------------------------------------------------------------
@@ -507,5 +547,5 @@ pub fn reconcile(previous: &ir::Ir, desired: &ir::Ir) -> Result<Vec<Request>, Tr
         &previous.certificates,
         &desired.certificates,
     )?);
-    Ok(canonicalize(requests))
+    Ok(canonicalize(drop_superseded_backend_removes(requests)))
 }
