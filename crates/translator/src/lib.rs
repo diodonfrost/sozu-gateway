@@ -226,23 +226,44 @@ fn replace_certificate_request(new: &ir::Certificate, old_fingerprint: String) -
 
 /// A certificate keyed by (listener, fingerprint) — Sōzu's own identity for a
 /// loaded cert (`HashMap<SocketAddr, HashMap<Fingerprint, _>>`).
-struct KeyedCert<'a> {
+struct KeyedCert {
     listener: SocketAddr,
     fingerprint: String,
-    cert: &'a ir::Certificate,
+    cert: ir::Certificate,
 }
 
-fn keyed_certs(certs: &[ir::Certificate]) -> Result<Vec<KeyedCert<'_>>, TranslatorError> {
-    certs
-        .iter()
-        .map(|c| {
-            Ok(KeyedCert {
-                listener: c.listener,
-                fingerprint: fingerprint(c)?,
-                cert: c,
-            })
-        })
-        .collect()
+/// Group the certs by (listener, fingerprint), unioning the SNI names within
+/// each group. The fingerprint is computed over the parsed DER, so two
+/// byte-different PEM encodings of the *same* certificate share one identity in
+/// Sōzu; kept as separate entries they would make the diff compare the single
+/// loaded cert against whichever duplicate it pairs with — re-emitting a
+/// ReplaceCertificate on every cycle and clamping SNI coverage to that entry's
+/// names. Grouping first keeps `reconcile(&ir, &ir)` empty and every hostname
+/// covered. The first occurrence fixes the group's position and PEM bytes
+/// (the DER is identical anyway); the merged name set is sorted.
+fn keyed_certs(certs: &[ir::Certificate]) -> Result<Vec<KeyedCert>, TranslatorError> {
+    let mut out: Vec<KeyedCert> = Vec::new();
+    let mut index: HashMap<(SocketAddr, String), usize> = HashMap::new();
+    for c in certs {
+        let fp = fingerprint(c)?;
+        match index.get(&(c.listener, fp.clone())) {
+            Some(&i) => {
+                let existing = &mut out[i].cert;
+                let mut names: BTreeSet<String> = existing.names.drain(..).collect();
+                names.extend(c.names.iter().cloned());
+                existing.names = names.into_iter().collect();
+            }
+            None => {
+                index.insert((c.listener, fp.clone()), out.len());
+                out.push(KeyedCert {
+                    listener: c.listener,
+                    fingerprint: fp,
+                    cert: c.clone(),
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ----------------------------------------------------------------------------
@@ -395,11 +416,9 @@ fn drop_superseded_backend_removes(requests: Vec<Request>) -> Vec<Request> {
     let added: BTreeSet<(String, String, SocketAddr)> = requests
         .iter()
         .filter_map(|req| match &req.request_type {
-            Some(RequestType::AddBackend(b)) => Some((
-                b.cluster_id.clone(),
-                b.backend_id.clone(),
-                b.address.into(),
-            )),
+            Some(RequestType::AddBackend(b)) => {
+                Some((b.cluster_id.clone(), b.backend_id.clone(), b.address.into()))
+            }
             _ => None,
         })
         .collect();
@@ -409,11 +428,9 @@ fn drop_superseded_backend_removes(requests: Vec<Request>) -> Vec<Request> {
     requests
         .into_iter()
         .filter(|req| match &req.request_type {
-            Some(RequestType::RemoveBackend(b)) => !added.contains(&(
-                b.cluster_id.clone(),
-                b.backend_id.clone(),
-                b.address.into(),
-            )),
+            Some(RequestType::RemoveBackend(b)) => {
+                !added.contains(&(b.cluster_id.clone(), b.backend_id.clone(), b.address.into()))
+            }
             _ => true,
         })
         .collect()
@@ -447,7 +464,9 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
 
 /// Minimal certificate requests to converge `previous` → `desired`. Identity is
 /// (listener, fingerprint) — matching Sōzu's own cert store — so the same cert on
-/// two listeners is tracked independently. Handles:
+/// two listeners is tracked independently. Both sides are grouped by that
+/// identity first (`keyed_certs`), so duplicate entries for one cert converge
+/// to a single entry carrying the union of their SNI names. Handles:
 ///  - new cert at (listener, fp)        -> AddCertificate
 ///  - cert gone from (listener, fp)     -> RemoveCertificate
 ///  - same (listener, fp), names differ -> ReplaceCertificate (same fp; Sōzu
@@ -478,8 +497,8 @@ fn certificate_requests(
         match prev_by_key.get(&(d.listener, d.fingerprint.as_str())) {
             // Same (listener, fp): in place. Only a name change needs a request.
             Some(p) => {
-                if names_set(p.cert) != names_set(d.cert) {
-                    out.push(replace_certificate_request(d.cert, d.fingerprint.clone()));
+                if names_set(&p.cert) != names_set(&d.cert) {
+                    out.push(replace_certificate_request(&d.cert, d.fingerprint.clone()));
                 }
             }
             None => truly_added.push(d),
@@ -495,15 +514,15 @@ fn certificate_requests(
     let mut used = vec![false; truly_removed.len()];
     for new in &truly_added {
         if let Some(idx) = truly_removed.iter().enumerate().position(|(i, old)| {
-            !used[i] && old.listener == new.listener && names_set(old.cert) == names_set(new.cert)
+            !used[i] && old.listener == new.listener && names_set(&old.cert) == names_set(&new.cert)
         }) {
             used[idx] = true;
             out.push(replace_certificate_request(
-                new.cert,
+                &new.cert,
                 truly_removed[idx].fingerprint.clone(),
             ));
         } else {
-            out.push(add_certificate_request(new.cert));
+            out.push(add_certificate_request(&new.cert));
         }
     }
     for (i, old) in truly_removed.iter_mut().enumerate() {

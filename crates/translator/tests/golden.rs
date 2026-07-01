@@ -21,6 +21,29 @@ fn addr(s: &str) -> SocketAddr {
     s.parse().expect("valid socket addr in test")
 }
 
+/// Re-wrap a PEM's base64 body at a different line width: byte-different text,
+/// identical DER — so Sōzu computes the same fingerprint for both encodings.
+fn rewrap_pem(pem: &str) -> String {
+    let mut header = "";
+    let mut footer = "";
+    let mut body = String::new();
+    for line in pem.lines() {
+        if line.starts_with("-----BEGIN") {
+            header = line;
+        } else if line.starts_with("-----END") {
+            footer = line;
+        } else {
+            body.push_str(line.trim());
+        }
+    }
+    let wrapped: Vec<&str> = body
+        .as_bytes()
+        .chunks(48)
+        .map(|c| std::str::from_utf8(c).expect("base64 is ASCII"))
+        .collect();
+    format!("{header}\n{}\n{footer}\n", wrapped.join("\n"))
+}
+
 fn cluster(id: &str, lb: ir::LbAlgorithm, sticky: bool) -> ir::Cluster {
     ir::Cluster {
         id: id.to_string(),
@@ -284,6 +307,67 @@ fn reconcile_cert_name_change_replaces_in_place() {
         "a name-only change must Replace in place, got {:?}",
         reqs[0].request_type
     );
+}
+
+#[test]
+fn reconcile_duplicate_fingerprint_certs_is_idempotent() {
+    // Two byte-different PEM encodings of the SAME certificate (fingerprints
+    // are computed over the parsed DER) at one listener, each carrying a
+    // different SNI name. They are one identity in Sōzu's cert store, so
+    // re-applying the unchanged IR must be a no-op — not a ReplaceCertificate
+    // every cycle that clamps SNI coverage to one entry's names.
+    let a = cert(CERT_A, KEY_A); // names: app.example.com
+    let mut b = cert(&rewrap_pem(CERT_A), KEY_A);
+    b.names = vec!["www.example.com".to_string()];
+
+    assert_ne!(a.certificate, b.certificate, "PEMs must be byte-different");
+    let fp = |pem: &str| {
+        sozu_command_lib::certificate::calculate_fingerprint(pem.as_bytes())
+            .expect("valid certificate")
+    };
+    assert_eq!(
+        fp(&a.certificate),
+        fp(&b.certificate),
+        "both encodings must share one fingerprint"
+    );
+
+    let model = ir::Ir {
+        certificates: vec![a, b],
+        ..Default::default()
+    };
+    assert!(
+        tr::reconcile(&model, &model).expect("reconcile").is_empty(),
+        "duplicate-fingerprint entries must reconcile to no requests"
+    );
+}
+
+#[test]
+fn reconcile_duplicate_fingerprint_certs_union_names() {
+    // The desired side has duplicate entries for one cert whose SNI name UNION
+    // differs from the loaded names: exactly one ReplaceCertificate, carrying
+    // the union — neither hostname may lose coverage.
+    let before = ir::Ir {
+        certificates: vec![cert(CERT_A, KEY_A)], // names: app.example.com
+        ..Default::default()
+    };
+    let mut dup = cert(&rewrap_pem(CERT_A), KEY_A);
+    dup.names = vec!["www.example.com".to_string()];
+    let after = ir::Ir {
+        certificates: vec![cert(CERT_A, KEY_A), dup],
+        ..Default::default()
+    };
+    let reqs = tr::reconcile(&before, &after).expect("reconcile");
+    assert_eq!(reqs.len(), 1, "one ReplaceCertificate expected: {reqs:#?}");
+    match &reqs[0].request_type {
+        Some(RequestType::ReplaceCertificate(r)) => {
+            assert_eq!(
+                r.new_certificate.names,
+                vec!["app.example.com".to_string(), "www.example.com".to_string()],
+                "the replacement must carry the union of the SNI names"
+            );
+        }
+        other => panic!("expected ReplaceCertificate, got {other:?}"),
+    }
 }
 
 #[test]
