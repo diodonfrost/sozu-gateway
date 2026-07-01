@@ -734,6 +734,55 @@ fn tcp_services_configmap_maps_to_l4_frontend() {
 }
 
 #[test]
+fn default_backend_only_ingress_reports_unsupported() {
+    // spec.defaultBackend has no verified Sōzu mapping: an Ingress made of
+    // only a defaultBackend builds to nothing, so the owner must see WHY
+    // instead of accepted-with-no-problems while requests 404.
+    let ing: Ingress = from_json(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": { "name": "web", "namespace": "demo" },
+        "spec": {
+            "ingressClassName": "sozu",
+            "defaultBackend": { "service": { "name": "web", "port": { "number": 80 } } }
+        }
+    }));
+    let inputs = Inputs {
+        ingresses: vec![ing],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert!(out.ir.frontends.is_empty(), "defaultBackend is not routed");
+    assert_eq!(
+        out.results[0].problems,
+        vec![Problem::DefaultBackendUnsupported]
+    );
+}
+
+#[test]
+fn default_backend_next_to_rules_still_builds_the_rules() {
+    let mut ing = ingress_tls();
+    ing.spec.as_mut().expect("spec").default_backend = Some(from_json(json!({
+        "service": { "name": "web", "port": { "number": 80 } }
+    })));
+    let inputs = Inputs {
+        ingresses: vec![ing],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 2, "the rules translate as usual");
+    assert!(out.results[0]
+        .problems
+        .contains(&Problem::DefaultBackendUnsupported));
+}
+
+#[test]
 fn ingress_hostless_rule_maps_to_catch_all() {
     // An Ingress rule with no `host` is a catch-all: emit one plain-HTTP `*`
     // frontend (Sōzu DomainRule::Any), no HTTPS frontend, no cert, no problem.

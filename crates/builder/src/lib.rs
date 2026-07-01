@@ -92,6 +92,10 @@ pub enum Problem {
         reason: String,
     },
     NonServiceBackend,
+    /// `spec.defaultBackend` is not mapped onto Sōzu routing: mapping it onto
+    /// Sōzu's catch-all semantics is unverified, so per the honesty rule it
+    /// is reported, never approximated. `spec.rules` still translate.
+    DefaultBackendUnsupported,
     ServiceNotFound {
         service: String,
     },
@@ -762,6 +766,14 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
             namespace: namespace.clone(),
             name: name.clone(),
         };
+
+        // spec.defaultBackend has no verified Sōzu equivalent; an Ingress
+        // relying on it would otherwise build to nothing while reading
+        // accepted-with-no-problems (its requests just 404). Report it and
+        // translate the rules as usual.
+        if spec.default_backend.is_some() {
+            problems.push(Problem::DefaultBackendUnsupported);
+        }
 
         // Automatic HTTP→HTTPS redirect: on by default, opt out per Ingress.
         let ssl_redirect = ingress
