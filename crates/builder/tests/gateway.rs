@@ -195,6 +195,107 @@ fn weighted_backends_are_unsupported() {
 }
 
 #[test]
+fn zero_weight_single_backend_is_drained_not_served() {
+    // weight: 0 on the (single) backendRef is the standard drain pattern: the
+    // backend must receive NO traffic (the spec even calls for a 500 when all
+    // weights are zero). Sōzu cannot weight or synthesize the 500, so the
+    // rule is reported and skipped — never served at 100%.
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80, "weight": 0 }] }]
+        }
+    }));
+    let out = build(&BuildConfig::default(), &inputs_with(route));
+
+    assert!(
+        out.ir.frontends.is_empty(),
+        "a drained backend gets nothing"
+    );
+    let p = &out.routes[0].parents[0];
+    assert!(p.problems.contains(&Problem::ZeroWeightBackendUnsupported {
+        service: "web".to_string(),
+    }));
+    // A skipped rule must show in the status, like every other skip path:
+    // ResolvedRefs downgrades the same way the weighted-split rejection does.
+    assert!(!p.resolved_refs, "the skipped rule must not read healthy");
+    assert_eq!(p.resolved_refs_reason, "BackendNotFound");
+}
+
+#[test]
+fn positive_weight_single_backend_still_routes() {
+    // A single backendRef with any positive weight IS 100% — no problem.
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80, "weight": 50 }] }]
+        }
+    }));
+    let out = build(&BuildConfig::default(), &inputs_with(route));
+
+    assert_eq!(out.ir.frontends.len(), 1);
+    assert!(out.routes[0].parents[0].problems.is_empty());
+}
+
+#[test]
+fn route_timeouts_are_reported_unsupported() {
+    // Sōzu has no per-route timeout knob: the rule still routes (RequestMirror
+    // precedent — drop the unsupported piece, never half-apply), but the user
+    // must see that the timeout took no effect.
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{
+                "timeouts": { "request": "10s" },
+                "backendRefs": [{ "name": "web", "port": 80 }]
+            }]
+        }
+    }));
+    let out = build(&BuildConfig::default(), &inputs_with(route));
+
+    assert_eq!(out.ir.frontends.len(), 1, "the rule still routes");
+    assert!(out.routes[0].parents[0]
+        .problems
+        .contains(&Problem::TimeoutsUnsupported));
+}
+
+#[test]
+fn backend_ref_filters_are_reported_unsupported() {
+    // Filters scoped to a backendRef have no Sōzu equivalent (filters wire
+    // onto the frontend). They must be reported, not silently dropped — and
+    // never half-applied onto the frontend.
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{
+                "backendRefs": [{ "name": "web", "port": 80, "filters": [
+                    { "type": "RequestHeaderModifier", "requestHeaderModifier": {
+                        "set": [{ "name": "X-Env", "value": "prod" }] } }
+                ]}]
+            }]
+        }
+    }));
+    let out = build(&BuildConfig::default(), &inputs_with(route));
+
+    assert_eq!(out.ir.frontends.len(), 1, "the backend still routes");
+    assert!(
+        out.ir.frontends[0].filters.header_mods.is_empty(),
+        "the backendRef filter must not leak onto the frontend"
+    );
+    assert!(out.routes[0].parents[0].problems.iter().any(
+        |p| matches!(p, Problem::FilterUnsupported { kind } if kind.contains("backendRef web"))
+    ));
+}
+
+#[test]
 fn http_route_filters_map_to_ir() {
     let route: HttpRoute = from_json(json!({
         "metadata": { "name": "route", "namespace": "demo" },

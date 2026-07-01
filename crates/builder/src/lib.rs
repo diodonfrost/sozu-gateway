@@ -148,6 +148,17 @@ pub enum Problem {
         expected: u16,
     },
     WeightedBackendsUnsupported,
+    /// A single `backendRef` with `weight: 0` (the standard drain pattern)
+    /// must receive no traffic; with every weight zero the spec even calls
+    /// for a 500 on matching requests. Sōzu can neither weight backends nor
+    /// synthesize that 500, so the rule is reported and skipped (fail
+    /// closed) instead of serving the drained backend 100% of the traffic.
+    ZeroWeightBackendUnsupported {
+        service: String,
+    },
+    /// `rule.timeouts` has no Sōzu equivalent; the rule still routes,
+    /// without the timeout, and the gap is reported.
+    TimeoutsUnsupported,
     HeaderOrQueryMatchUnsupported,
     /// A listener's `allowedRoutes.namespaces.from: Selector` cannot be
     /// evaluated (there is no Namespace label index), so the listener fails

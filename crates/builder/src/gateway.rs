@@ -17,11 +17,12 @@
 //!    RequestRedirect (scheme + status);
 //!  - cross-namespace `backendRefs`/`certificateRefs` honour `ReferenceGrant`.
 //!
-//! Not yet: header/query matches, weighted multi-backend split, TLS Passthrough,
-//! RequestMirror, redirect host/path/port, and URLRewrite (Sōzu's rewrite_host
-//! rewrites the *backend authority* — it dials the rewritten host — so a literal
-//! Gateway rewrite 408s; header/query match and weighted split are Sōzu hard
-//! limits).
+//! Not yet: header/query matches, weighted multi-backend split (incl. a
+//! single weight-0 drain), rule timeouts, per-backendRef filters, TLS
+//! Passthrough, RequestMirror, redirect host/path/port, and URLRewrite
+//! (Sōzu's rewrite_host rewrites the *backend authority* — it dials the
+//! rewritten host — so a literal Gateway rewrite 408s; header/query match and
+//! weighted split are Sōzu hard limits).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -623,6 +624,17 @@ fn attach_rule(
     // sub-fields are reported and skipped, never silently mis-applied.
     let filters = parse_filters(rule.filters.as_deref().unwrap_or(&[]), problems);
 
+    // `rule.timeouts` has no Sōzu equivalent. RequestMirror precedent: the
+    // unsupported piece is reported and dropped — the rule still routes,
+    // just without the timeout, and the gap is visible instead of silent.
+    if rule
+        .timeouts
+        .as_ref()
+        .is_some_and(|t| t.request.is_some() || t.backend_request.is_some())
+    {
+        problems.push(Problem::TimeoutsUnsupported);
+    }
+
     // Resolve the backend. A redirect-only rule has no backendRefs (the Gateway
     // API even forbids combining RequestRedirect with backendRefs), so it yields
     // a frontend with no cluster; otherwise exactly one Service backendRef is
@@ -650,6 +662,31 @@ fn attach_rule(
             problems.push(Problem::NonServiceBackend);
             fail_ref(resolved_refs, resolved_refs_reason, "InvalidKind");
             return;
+        }
+        // A single backendRef with `weight: 0` (the standard drain pattern)
+        // must receive NO traffic; with every weight zero the spec calls for
+        // a 500 on matching requests. Sōzu can neither weight nor synthesize
+        // that 500, so fail closed — report and skip the rule — instead of
+        // serving the drained backend 100% of the traffic. Any positive
+        // weight on a single ref *is* 100% and keeps working. Like every
+        // other skipped rule, the skip must show in the status, not only in
+        // the problem list: downgrade ResolvedRefs the same way the
+        // weighted-split path does, so the route never reads fully healthy
+        // while nothing is programmed.
+        if br.weight == Some(0) {
+            problems.push(Problem::ZeroWeightBackendUnsupported {
+                service: br.name.clone(),
+            });
+            fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
+            return;
+        }
+        // Per-backendRef filters have no Sōzu equivalent (filters wire onto
+        // the frontend, at rule level). RequestMirror precedent: report the
+        // unsupported piece and route without it, never half-apply it.
+        if br.filters.as_ref().is_some_and(|f| !f.is_empty()) {
+            problems.push(Problem::FilterUnsupported {
+                kind: format!("filters on backendRef {}", br.name),
+            });
         }
         let backend_ns = br.namespace.clone().unwrap_or_else(|| route_ns.to_string());
         if backend_ns != route_ns
