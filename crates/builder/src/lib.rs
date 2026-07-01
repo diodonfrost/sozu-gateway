@@ -47,6 +47,14 @@ pub struct BuildConfig {
     pub controller_name: String,
     pub http_listener: SocketAddr,
     pub https_listener: SocketAddr,
+    /// Externally advertised port for HTTP Gateway listeners: the port clients
+    /// connect to (the LoadBalancer Service's exposed port), which a Gateway's
+    /// `listener.port` declares. Distinct from `http_listener`, the pod-level
+    /// bind — under the chart defaults the Service maps 80 → 8080.
+    pub gateway_http_port: u16,
+    /// Externally advertised port for HTTPS Gateway listeners (see
+    /// [`Self::gateway_http_port`]).
+    pub gateway_https_port: u16,
 }
 
 impl Default for BuildConfig {
@@ -57,6 +65,8 @@ impl Default for BuildConfig {
             controller_name: "sozu.io/gateway-controller".to_string(),
             http_listener: "0.0.0.0:80".parse().expect("const addr"),
             https_listener: "0.0.0.0:443".parse().expect("const addr"),
+            gateway_http_port: 80,
+            gateway_https_port: 443,
         }
     }
 }
@@ -122,6 +132,20 @@ pub enum Problem {
     },
     UnsupportedProtocol {
         protocol: String,
+    },
+    /// An HTTP/HTTPS listener declares a port that differs from the
+    /// externally advertised port for its protocol
+    /// ([`BuildConfig::gateway_http_port`]/[`BuildConfig::gateway_https_port`]).
+    /// `listener.port` is the client-visible port — the LoadBalancer
+    /// Service's exposed port, not the pod bind — and the gateway only
+    /// serves the advertised ones (Sōzu's HTTP(S) listeners are fixed at
+    /// boot); the listener is reported and NOT programmed — landing its
+    /// routes on the advertised port would silently serve traffic on a port
+    /// the Gateway never declared.
+    ListenerPortMismatch {
+        listener: String,
+        declared: i32,
+        expected: u16,
     },
     WeightedBackendsUnsupported,
     HeaderOrQueryMatchUnsupported,

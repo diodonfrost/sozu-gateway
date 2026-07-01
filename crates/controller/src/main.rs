@@ -69,6 +69,16 @@ struct Args {
     /// HTTPS listener address declared in Sōzu's config.toml.
     #[arg(long, env = "SOZU_GW_HTTPS_LISTENER", default_value = "0.0.0.0:443")]
     https_listener: SocketAddr,
+    /// Externally advertised port for HTTP Gateway listeners — what a
+    /// Gateway's `listener.port` declares and clients connect to (the
+    /// LoadBalancer Service's exposed port), as opposed to the pod-level
+    /// `--http-listener` bind.
+    #[arg(long, env = "SOZU_GW_GATEWAY_HTTP_PORT", default_value = "80")]
+    gateway_http_port: u16,
+    /// Externally advertised port for HTTPS Gateway listeners (see
+    /// `--gateway-http-port`).
+    #[arg(long, env = "SOZU_GW_GATEWAY_HTTPS_PORT", default_value = "443")]
+    gateway_https_port: u16,
     /// Debounce window: coalesce bursts of watch events before reconciling.
     #[arg(long, env = "SOZU_GW_DEBOUNCE_MS", default_value = "500")]
     debounce_ms: u64,
@@ -228,6 +238,8 @@ async fn reconcile(
         controller_name: args.controller_name.clone(),
         http_listener: args.http_listener,
         https_listener: args.https_listener,
+        gateway_http_port: args.gateway_http_port,
+        gateway_https_port: args.gateway_https_port,
     };
     let inputs = Inputs {
         ingresses: collect(&stores.ingresses),
