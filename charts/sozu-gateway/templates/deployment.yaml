@@ -76,6 +76,13 @@ spec:
               value: "0.0.0.0:{{ .Values.sozu.httpPort }}"
             - name: SOZU_GW_HTTPS_LISTENER
               value: "0.0.0.0:{{ .Values.sozu.httpsPort }}"
+            # Advertised Gateway API listener ports: what a Gateway's
+            # listeners[].port declares — the Service's client-facing ports,
+            # which map onto the unprivileged pod binds above.
+            - name: SOZU_GW_GATEWAY_HTTP_PORT
+              value: {{ .Values.service.httpPort | quote }}
+            - name: SOZU_GW_GATEWAY_HTTPS_PORT
+              value: {{ .Values.service.httpsPort | quote }}
             - name: SOZU_GW_DEBOUNCE_MS
               value: {{ .Values.controller.debounceMs | quote }}
             - name: SOZU_GW_RESYNC_SECS

@@ -7,7 +7,9 @@
 //! gap never silently mis-routes):
 //!  - `GatewayClass` selected by `controllerName`;
 //!  - `Gateway` HTTP/HTTPS listeners mapped to the static `:80`/`:443` listeners
-//!    by protocol; HTTPS loads its `certificateRefs` (Terminate only);
+//!    by protocol (`listener.port` must match the *advertised* gateway port for
+//!    the protocol — the Service-exposed port, not the pod bind); HTTPS loads
+//!    its `certificateRefs` (Terminate only);
 //!  - `HTTPRoute` attached by `parentRef` (optional `sectionName`), with path
 //!    (`PathPrefix`/`Exact`/`RegularExpression`) and method matches, and either
 //!    one Service `backendRef` or a redirect-only rule (no backend);
@@ -199,7 +201,30 @@ fn build_listener(
         });
     }
 
-    if !selector_unsupported {
+    // `listener.port` declares the externally advertised port — what clients
+    // connect to on the LoadBalancer Service — NOT the pod-level bind (under
+    // the chart defaults the Service maps 80 → 8080 / 443 → 8443, so
+    // comparing against the bind would reject every standard port-80/443
+    // Gateway). The gateway only serves the configured advertised port per
+    // protocol (Sōzu's HTTP(S) listeners are fixed at boot); a mismatch
+    // fails closed: programming its routes anyway would silently serve them
+    // on a port the Gateway never declared.
+    let expected_port = if info.https {
+        cfg.gateway_https_port
+    } else {
+        cfg.gateway_http_port
+    };
+    if routable && l.port != i32::from(expected_port) {
+        info.accepted = false;
+        info.accepted_reason = "PortUnavailable";
+        info.programmed = false;
+        info.programmed_reason = "Invalid";
+        problems.push(Problem::ListenerPortMismatch {
+            listener: l.name.clone(),
+            declared: l.port,
+            expected: expected_port,
+        });
+    } else if !selector_unsupported {
         match l.protocol.as_str() {
             "HTTP" => info.programmed = true,
             "HTTPS" => {
@@ -359,9 +384,15 @@ pub(crate) fn build_gateway(
                 .filter(|l| pref.section_name.as_ref().is_none_or(|sn| sn == &l.name))
                 .filter(|l| pref.port.is_none_or(|p| p == l.port))
                 .collect();
+            // A non-accepted listener (port-mismatched) can never serve the
+            // route, so it is no more of a binding target than one that
+            // rejects the namespace: excluding it here keeps the route from
+            // reading healthy — and from counting toward attachedRoutes —
+            // on a listener that will not carry its traffic.
             let candidates: Vec<&ListenerInfo> = addressable
                 .iter()
                 .copied()
+                .filter(|l| l.accepted)
                 .filter(|l| l.allow_from.admits(&rns, &gw_ns))
                 .collect();
 

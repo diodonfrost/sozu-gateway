@@ -891,6 +891,140 @@ fn selector_https_listener_loads_no_certificates() {
 }
 
 #[test]
+fn listener_port_mismatch_is_reported_and_not_programmed() {
+    // The advertised gateway ports default to 80/443: a listener declaring
+    // port 8080 is not served on any client-visible port. Its routes must
+    // NOT silently land on :80 — fail closed and report the mismatch — and
+    // a route whose ONLY matching listener is port-mismatched must not read
+    // healthy or count toward attachedRoutes.
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "http-alt", "protocol": "HTTP", "port": 8080 }
+        ]}
+    }));
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        http_routes: vec![route],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert!(out.ir.frontends.is_empty(), "no traffic on the wrong port");
+    assert!(out.gateways[0]
+        .problems
+        .contains(&Problem::ListenerPortMismatch {
+            listener: "http-alt".to_string(),
+            declared: 8080,
+            expected: 80,
+        }));
+    let l = &out.gateways[0].listeners[0];
+    assert!(!l.accepted);
+    assert_eq!(l.accepted_reason, "PortUnavailable");
+    assert!(!l.programmed);
+    assert_eq!(l.programmed_reason, "Invalid");
+    assert_eq!(
+        l.attached_routes, 0,
+        "a mismatched listener carries no routes"
+    );
+    let p = &out.routes[0].parents[0];
+    assert!(!p.accepted, "the route must not read healthy");
+    assert_eq!(p.accepted_reason, "NotAllowedByListeners");
+}
+
+#[test]
+fn listener_on_the_advertised_port_is_programmed() {
+    // The check compares against the *configured* advertised port, not a
+    // hardcoded 80: with gateway_http_port overridden to 8080, a listener
+    // declaring 8080 programs fine.
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "http", "protocol": "HTTP", "port": 8080 }
+        ]}
+    }));
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        http_routes: vec![route],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let cfg = BuildConfig {
+        gateway_http_port: 8080,
+        ..Default::default()
+    };
+    let out = build(&cfg, &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1);
+    let l = &out.gateways[0].listeners[0];
+    assert!(l.accepted && l.programmed);
+    assert!(out.gateways[0].problems.is_empty());
+}
+
+#[test]
+fn standard_gateway_ports_are_accepted_on_unprivileged_binds() {
+    // The shipped chart binds the pod on 8080/8443 while the LoadBalancer
+    // Service exposes 80/443. `listener.port` is the client-visible port, so
+    // a standard Gateway declaring 80/443 MUST be accepted under that config
+    // — comparing against the bind ports would reject every default install.
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "http", "protocol": "HTTP", "port": 80 },
+            { "name": "https", "protocol": "HTTPS", "port": 443,
+              "hostname": "app.example.com",
+              "tls": { "mode": "Terminate", "certificateRefs": [{ "name": "app-tls" }] } }
+        ]}
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        http_routes: vec![route_to_web(false)],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        secrets: vec![tls_secret()],
+        ..Default::default()
+    };
+    let cfg = BuildConfig {
+        // The chart's pod-level binds; advertised ports keep their 80/443
+        // defaults, as the chart wires them from the Service values.
+        http_listener: "0.0.0.0:8080".parse().expect("addr"),
+        https_listener: "0.0.0.0:8443".parse().expect("addr"),
+        ..Default::default()
+    };
+    let out = build(&cfg, &inputs);
+
+    assert!(out.gateways[0].problems.is_empty(), "no port mismatch");
+    for l in &out.gateways[0].listeners {
+        assert!(l.accepted && l.programmed, "listener {} healthy", l.name);
+    }
+    assert_eq!(out.ir.frontends.len(), 2, "HTTP + HTTPS frontends emitted");
+    assert_eq!(out.ir.certificates.len(), 1, "listener cert loaded");
+    assert!(out.routes[0].parents[0].accepted);
+}
+
+#[test]
 fn gateway_listener_status_counts_attached_routes() {
     let gw: Gateway = from_json(json!({
         "metadata": { "name": "gw", "namespace": "demo" },

@@ -59,6 +59,10 @@ sozu:
 service:
   type: LoadBalancer
   externalTrafficPolicy: Local
+  # Client-facing ports on the LoadBalancer (mapped to sozu.httpPort/httpsPort
+  # in the pod). These are also the ports Gateway API listeners must declare
+  # (`listeners[].port`); the chart wires them to the controller as the
+  # advertised gateway ports.
   httpPort: 80
   httpsPort: 443
   annotations: {}
