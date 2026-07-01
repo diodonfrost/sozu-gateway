@@ -185,28 +185,44 @@ fn build_listener(
         supported_kinds: vec![],
     };
 
-    match l.protocol.as_str() {
-        "HTTP" => info.programmed = true,
-        "HTTPS" => {
-            let (loaded, reason) =
-                load_listener_certs(cfg, inputs, index, gw_ns, l, certificates, problems);
-            if loaded {
-                info.programmed = true;
-            } else {
+    // An unevaluable namespace selector fails closed exactly like the other
+    // fail-closed listener paths: the listener admits no routes (see
+    // `AllowedFrom::admits`), must not read cleanly Programmed, and — like
+    // the port-mismatch path — loads none of its certificates into Sōzu
+    // (material for a listener that serves nothing has no business there).
+    let selector_unsupported = routable && matches!(info.allow_from, AllowedFrom::Selector);
+    if selector_unsupported {
+        info.programmed = false;
+        info.programmed_reason = "Invalid";
+        problems.push(Problem::NamespaceSelectorUnsupported {
+            listener: l.name.clone(),
+        });
+    }
+
+    if !selector_unsupported {
+        match l.protocol.as_str() {
+            "HTTP" => info.programmed = true,
+            "HTTPS" => {
+                let (loaded, reason) =
+                    load_listener_certs(cfg, inputs, index, gw_ns, l, certificates, problems);
+                if loaded {
+                    info.programmed = true;
+                } else {
+                    info.programmed = false;
+                    info.programmed_reason = "Invalid";
+                    info.resolved_refs = false;
+                    info.resolved_refs_reason = reason;
+                }
+            }
+            other => {
+                info.accepted = false;
+                info.accepted_reason = "UnsupportedProtocol";
                 info.programmed = false;
                 info.programmed_reason = "Invalid";
-                info.resolved_refs = false;
-                info.resolved_refs_reason = reason;
+                problems.push(Problem::UnsupportedProtocol {
+                    protocol: other.to_string(),
+                });
             }
-        }
-        other => {
-            info.accepted = false;
-            info.accepted_reason = "UnsupportedProtocol";
-            info.programmed = false;
-            info.programmed_reason = "Invalid";
-            problems.push(Problem::UnsupportedProtocol {
-                protocol: other.to_string(),
-            });
         }
     }
 
@@ -222,9 +238,12 @@ fn build_listener(
     info
 }
 
-/// A listener's `allowedRoutes.namespaces.from` policy. `Selector` is treated as
-/// permissive: we have no Namespace label index to evaluate it, so we do not
-/// reject on it (the conformance rejection case uses the default `Same`).
+/// A listener's `allowedRoutes.namespaces.from` policy. `Selector` is
+/// unsupported — there is no Namespace label index to evaluate it against — so
+/// it fails CLOSED: the listener admits no routes at all and the gap is
+/// reported ([`Problem::NamespaceSelectorUnsupported`]). Treating it as
+/// permissive would silently admit every namespace on a control the Gateway
+/// owner set precisely to restrict admission.
 #[derive(Clone, Copy)]
 enum AllowedFrom {
     Same,
@@ -249,8 +268,12 @@ impl AllowedFrom {
     /// Does this listener admit a route from `route_ns` (gateway in `gw_ns`)?
     fn admits(self, route_ns: &str, gw_ns: &str) -> bool {
         match self {
-            AllowedFrom::All | AllowedFrom::Selector => true,
+            AllowedFrom::All => true,
             AllowedFrom::Same => route_ns == gw_ns,
+            // Unsupported means unsupported: an unevaluable selector admits
+            // nothing — not even the Gateway's own namespace (`from: Selector`
+            // replaces `Same`, it does not extend it).
+            AllowedFrom::Selector => false,
         }
     }
 }

@@ -125,6 +125,13 @@ pub enum Problem {
     },
     WeightedBackendsUnsupported,
     HeaderOrQueryMatchUnsupported,
+    /// A listener's `allowedRoutes.namespaces.from: Selector` cannot be
+    /// evaluated (there is no Namespace label index), so the listener fails
+    /// CLOSED — it admits no routes at all — rather than silently admitting
+    /// every namespace on a control the Gateway owner meant to restrict.
+    NamespaceSelectorUnsupported {
+        listener: String,
+    },
     FilterUnsupported {
         kind: String,
     },

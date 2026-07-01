@@ -794,6 +794,103 @@ fn cross_namespace_route_to_all_listener_is_accepted() {
 }
 
 #[test]
+fn selector_listener_fails_closed_and_is_reported() {
+    // `allowedRoutes.namespaces.from: Selector` cannot be evaluated (no
+    // Namespace label index). It must fail CLOSED: no route is admitted from
+    // ANY namespace (a selector replaces Same, it does not extend it), the
+    // listener must not read cleanly Programmed, and the gap is reported —
+    // never silently widened to All.
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "http", "protocol": "HTTP", "port": 80,
+              "allowedRoutes": { "namespaces": { "from": "Selector",
+                  "selector": { "matchLabels": { "team": "web" } } } } }
+        ]}
+    }));
+    let cross_ns_route: HttpRoute = from_json(json!({
+        "metadata": { "name": "cross", "namespace": "other" },
+        "spec": {
+            "parentRefs": [{ "name": "gw", "namespace": "demo" }],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+        }
+    }));
+    let same_ns_route: HttpRoute = from_json(json!({
+        "metadata": { "name": "same", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        http_routes: vec![cross_ns_route, same_ns_route],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert!(out.ir.frontends.is_empty(), "no route admitted");
+    for route in &out.routes {
+        let p = &route.parents[0];
+        assert!(!p.accepted, "{} must not be admitted", route.name);
+        assert_eq!(p.accepted_reason, "NotAllowedByListeners");
+    }
+    assert!(out.gateways[0]
+        .problems
+        .contains(&Problem::NamespaceSelectorUnsupported {
+            listener: "http".to_string(),
+        }));
+    let l = &out.gateways[0].listeners[0];
+    assert!(!l.programmed, "listener must not read cleanly Programmed");
+    assert_eq!(l.programmed_reason, "Invalid");
+}
+
+#[test]
+fn selector_https_listener_loads_no_certificates() {
+    // Fail closed means ALL the way closed: an HTTPS listener with perfectly
+    // valid certificateRefs but `from: Selector` admits no routes, so its
+    // certificates must not be loaded into Sōzu either — exactly like the
+    // port-mismatch path, which skips cert loading entirely.
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [{
+            "name": "https", "protocol": "HTTPS", "port": 443,
+            "hostname": "app.example.com",
+            "tls": { "mode": "Terminate", "certificateRefs": [{ "name": "app-tls" }] },
+            "allowedRoutes": { "namespaces": { "from": "Selector",
+                "selector": { "matchLabels": { "team": "web" } } } }
+        }]}
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        http_routes: vec![route_to_web(false)],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        secrets: vec![tls_secret()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert!(
+        out.ir.certificates.is_empty(),
+        "a Selector listener must load no certificates"
+    );
+    assert!(out.ir.frontends.is_empty(), "and admit no routes");
+    let l = &out.gateways[0].listeners[0];
+    assert!(!l.programmed);
+    assert_eq!(l.programmed_reason, "Invalid");
+    assert!(out.gateways[0]
+        .problems
+        .contains(&Problem::NamespaceSelectorUnsupported {
+            listener: "https".to_string(),
+        }));
+}
+
+#[test]
 fn gateway_listener_status_counts_attached_routes() {
     let gw: Gateway = from_json(json!({
         "metadata": { "name": "gw", "namespace": "demo" },
