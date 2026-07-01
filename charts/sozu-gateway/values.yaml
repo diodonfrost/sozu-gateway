@@ -28,7 +28,8 @@ ingressClass:
 controller:
   logLevel: info          # RUST_LOG (e.g. "info", "info,sozu_gw_controller=debug")
   debounceMs: 500         # coalesce bursts of watch events
-  resyncSecs: 60          # periodic full resync
+  resyncSecs: 60          # periodic full resync; 0 disables it (Sōzu-restart
+                          # detection then only runs on a command-socket reconnect)
   healthPort: 8081        # /healthz (liveness) + /readyz (readiness gated on first reconcile)
 
 # Prometheus /metrics on the controller. Each scrape pulls Sōzu's data-plane

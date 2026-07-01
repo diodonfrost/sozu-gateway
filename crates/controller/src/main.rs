@@ -86,7 +86,9 @@ struct Args {
     /// Debounce window: coalesce bursts of watch events before reconciling.
     #[arg(long, env = "SOZU_GW_DEBOUNCE_MS", default_value = "500")]
     debounce_ms: u64,
-    /// Periodic full resync interval (self-heals any drift).
+    /// Periodic full resync interval in seconds (self-heals any drift). `0`
+    /// disables the periodic resync; Sōzu-restart detection then only runs
+    /// when the command socket reconnects, not on a schedule.
     #[arg(long, env = "SOZU_GW_RESYNC_SECS", default_value = "60")]
     resync_secs: u64,
     /// Publish this Service's LoadBalancer address into managed Ingresses'
@@ -186,6 +188,34 @@ where
         store.wait_until_ready().await
     } else {
         Ok(())
+    }
+}
+
+/// Interpret the configured resync interval: `0` means "disabled" (a zero
+/// `tokio::time::interval` would panic, and disabling the periodic resync is
+/// the only sensible reading of an explicit `SOZU_GW_RESYNC_SECS=0`).
+fn resync_period(secs: u64) -> Option<Duration> {
+    (secs != 0).then(|| Duration::from_secs(secs))
+}
+
+/// Build the periodic resync interval. Unlike a raw `interval()`, whose first
+/// tick completes immediately (which would re-run a redundant reconcile right
+/// after the initial one), the first tick lands one full period after startup.
+fn resync_interval(period: Duration) -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.reset();
+    interval
+}
+
+/// Tick the optional resync interval; when resync is disabled, pend forever so
+/// the `select!` arm simply never fires.
+async fn maybe_tick(interval: Option<&mut tokio::time::Interval>) {
+    match interval {
+        Some(interval) => {
+            interval.tick().await;
+        }
+        None => std::future::pending::<()>().await,
     }
 }
 
@@ -538,8 +568,10 @@ async fn main() -> Result<()> {
     let mut acked_reconnects = agent.reconnect_epoch();
 
     let debounce = Duration::from_millis(args.debounce_ms);
-    let mut resync = tokio::time::interval(Duration::from_secs(args.resync_secs));
-    resync.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut resync = resync_period(args.resync_secs).map(resync_interval);
+    if resync.is_none() {
+        info!("periodic resync disabled (resync-secs = 0)");
+    }
 
     // Graceful shutdown on the signals Kubernetes uses on Pod termination, so we
     // stop cleanly within the grace period instead of being SIGKILLed.
@@ -578,7 +610,7 @@ async fn main() -> Result<()> {
                 tokio::time::sleep(debounce).await;
                 while rx.try_recv().is_ok() {}
             }
-            _ = resync.tick() => {
+            _ = maybe_tick(resync.as_mut()) => {
                 debug!("periodic resync");
                 check_sozu = true;
             }
@@ -676,5 +708,32 @@ mod tests {
         let (store, writer) = reflector::store::<ConfigMap>();
         drop(writer);
         assert!(ready_when(true, &store).await.is_err());
+    }
+
+    #[test]
+    fn zero_resync_secs_disables_the_periodic_resync() {
+        // 0 must read as "disabled", never reach tokio's zero-interval panic.
+        assert_eq!(resync_period(0), None);
+        assert_eq!(resync_period(60), Some(Duration::from_secs(60)));
+    }
+
+    #[tokio::test]
+    async fn disabled_resync_arm_never_fires() {
+        let fired = tokio::time::timeout(Duration::from_millis(50), maybe_tick(None)).await;
+        assert!(fired.is_err(), "a disabled resync must pend forever");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resync_interval_first_tick_lands_one_period_after_startup() {
+        let mut interval = resync_interval(Duration::from_secs(60));
+        // A raw `interval()` would tick immediately, re-running a redundant
+        // reconcile right after the initial one.
+        let early =
+            tokio::time::timeout(Duration::from_secs(1), maybe_tick(Some(&mut interval))).await;
+        assert!(early.is_err(), "first tick must not complete immediately");
+        // ... but it must still fire once a full period has elapsed.
+        let due =
+            tokio::time::timeout(Duration::from_secs(120), maybe_tick(Some(&mut interval))).await;
+        assert!(due.is_ok(), "the interval must tick after one period");
     }
 }
