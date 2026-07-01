@@ -16,13 +16,17 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 # Async handle: oneshot replies from the dedicated blocking worker thread.
 tokio = { workspace = true }
+# The command-socket stream is built by hand (a socket2 socket with the
+# write timeout set *before* connect, converted to std, then
+# `mio::net::UnixStream::from_std`) so neither connect nor writes can block
+# forever on a wedged Sōzu; `Channel::from_path` offers no way to bound
+# either, and std can only set `SO_SNDTIMEO` on a connected stream.
+mio = { workspace = true }
+socket2 = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true }
-# Socket tests run a fake Sōzu: a `Channel<Response, Request>` built on an
-# accepted mio stream, so tests speak the crate's real wire framing.
-mio = { workspace = true }
 # End-to-end smoke example dogfoods the pure pipeline (IR -> Translator -> Agent).
 sozu-gw-ir = { workspace = true }
 sozu-gw-translator = { workspace = true }

@@ -31,6 +31,11 @@ sozu-command-lib = "2.1.0"
 # socket's `mio::net::UnixStream` itself (from a std stream) so it can bound
 # writes, and tests reuse `Channel` server-side to speak the real framing.
 mio = { version = "1.2", features = ["net"] }
+# The command socket is created with socket2 so `SO_SNDTIMEO` can be set
+# *before* connect: on Linux a blocking AF_UNIX connect() waits under the
+# send timeout when the listener backlog is full, and the std API can only
+# set the option after connect returns. Safe API — no unsafe in our code.
+socket2 = "0.6"
 
 # Errors: typed per-crate with thiserror; anyhow only in the binary.
 thiserror = "2"
