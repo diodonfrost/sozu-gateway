@@ -129,6 +129,13 @@ from **3 → 16**.
 > `Programmed` in time because the controller reports `SecretNotFound` for the suite's
 > programmatically-created `tls-validity-checks-certificate` — a setup-timing gate, not a routing bug.
 
+> **Stale vs. the current tree:** the recorded 16/33 predates the `allowedRoutes.namespaces`
+> `from: Selector` fail-closed change. The upstream `HTTPRouteCrossNamespace` and
+> `GatewayWithAttachedRoutes` tests attach their routes through `from: Selector` Gateways, so
+> those recorded passes were artifacts of the old fail-open bug (Selector admitted every
+> namespace); with Selector now admitting nothing, the suite needs a re-run. The report YAML is
+> kept unedited as the record of that run.
+
 **Passing (16):** the 3 `*ObservedGenerationBump`; `HTTPRouteSimpleSameNamespace`,
 `HTTPRouteExactPathMatching`, `HTTPRouteCrossNamespace`, `HTTPRouteServiceTypes`;
 `HTTPRouteInvalidParentRefNotMatchingSectionName`, `HTTPRouteInvalidCrossNamespaceParentRef`;

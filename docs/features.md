@@ -17,9 +17,9 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Ingress | `pathType: Prefix` | ✅ | |
 | Ingress | `pathType: Exact` | ✅ | |
 | Ingress | `pathType: ImplementationSpecific` | ✅ | mapped to a Sōzu regex (2.x anchors regexes) |
-| Ingress | Multiple Ingresses / hosts / paths | ✅ | de-duplicated by route key |
+| Ingress | Multiple Ingresses / hosts / paths | ✅ | de-duplicated by route key; a conflicting owner of the same host+path is reported (`RouteCollision` on the loser; the winner is deterministic) |
 | Ingress | Rule without a host (catch-all) | ❌ | skipped with a reported problem |
-| Ingress | `spec.defaultBackend` | ❌ | not implemented |
+| Ingress | `spec.defaultBackend` | ❌ | not routed; reported as a `DefaultBackendUnsupported` problem |
 | Ingress | `backend.resource` (non-Service backend) | ❌ | only Service backends |
 | TLS | Termination from a `Secret` (`tls.crt`/`tls.key`) | ✅ | works with cert-manager-issued Secrets |
 | TLS | SNI host selection | ✅ | handled by Sōzu |
@@ -43,13 +43,17 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | API gateway | Weighted split across multiple Services | ❌ | not supported by Sōzu |
 | API gateway | Request mirroring / shadowing | ❌ | not supported by Sōzu |
 | Gateway API | `GatewayClass` (by `controllerName`) | ✅ | status `Accepted` reported |
-| Gateway API | `Gateway` HTTP/HTTPS listeners | ✅ | mapped to the static `:80`/`:443`; status `Accepted`/`Programmed` |
+| Gateway API | `Gateway` HTTP/HTTPS listeners | ✅ | must declare the advertised ports (default `80`/`443`, configurable via `--gateway-http(s)-port`); a mismatch is rejected with `PortUnavailable`. Status `Accepted`/`Programmed` |
 | Gateway API | `HTTPRoute` (host, path, method) | ✅ | status `Accepted`/`ResolvedRefs` per parent |
 | Gateway API | `ReferenceGrant` (cross-namespace refs) | ✅ | gates cross-ns backend/cert refs |
-| Gateway API | One Service `backendRef` per rule | ✅ | |
+| Gateway API | `allowedRoutes.namespaces` — `from: All`/`Same` | ✅ | |
+| Gateway API | `allowedRoutes.namespaces` — `from: Selector` | ❌ | fails closed — the listener admits no routes; reported as `NamespaceSelectorUnsupported` |
+| Gateway API | One Service `backendRef` per rule | ✅ | a single ref with `weight: 0` (drain) is rejected (`ZeroWeightBackendUnsupported`): Sōzu cannot express the spec's all-zero-weight 500 |
 | Gateway API | Weighted multi-`backendRef` split | ❌ | not supported by Sōzu |
 | Gateway API | Header/query matches | ❌ | not supported by Sōzu |
-| Gateway API | Route filters (header edit, redirect) | ✅ | see the API-gateway rows above (URLRewrite reported unsupported) |
+| Gateway API | Rule-level filters (header edit, redirect) | ✅ | see the API-gateway rows above (URLRewrite reported unsupported) |
+| Gateway API | Per-`backendRef` filters | ❌ | filters wire onto the frontend, not one backend; reported (`FilterUnsupported`), the rule still routes without them |
+| Gateway API | `rule.timeouts` | ❌ | no Sōzu equivalent; reported (`TimeoutsUnsupported`), the rule still routes without the timeout |
 | Gateway API | TLS `Passthrough` | ❌ | terminate only |
 | Gateway API | `GRPCRoute` / `TCPRoute` / `TLSRoute` | ❌ | HTTPRoute only |
 | Protocols | HTTP / HTTPS (L7) | ✅ | |
