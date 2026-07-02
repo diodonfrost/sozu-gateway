@@ -1,6 +1,7 @@
 //! Golden + behavioural tests for the Builder (K8s objects -> IR).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
@@ -17,6 +18,12 @@ const KEY_A: &str = include_str!("fixtures/key_a.pem");
 
 fn from_json<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
     serde_json::from_value(v).expect("valid k8s object json")
+}
+
+/// Wrap plain objects in the `Arc`s `Inputs` borrows (the controller passes
+/// its reflector-cache `Arc`s straight through).
+fn arcs<T>(items: Vec<T>) -> Vec<Arc<T>> {
+    items.into_iter().map(Arc::new).collect()
 }
 
 fn tls_secret(ns: &str, name: &str, crt: &str, key: &str) -> Secret {
@@ -83,10 +90,10 @@ fn ingress_tls() -> Ingress {
 #[test]
 fn happy_path_http_and_tls() {
     let inputs = Inputs {
-        ingresses: vec![ingress_tls()],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -107,10 +114,10 @@ fn ignores_other_ingress_class() {
     let mut ing: Ingress = ingress_tls();
     ing.spec.as_mut().unwrap().ingress_class_name = Some("nginx".to_string());
     let inputs = Inputs {
-        ingresses: vec![ing],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![],
+        ingresses: arcs(vec![ing]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -124,10 +131,10 @@ fn ignores_other_ingress_class() {
 #[test]
 fn missing_secret_reports_problem_and_skips_tls() {
     let inputs = Inputs {
-        ingresses: vec![ingress_tls()],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![], // secret absent
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![]), // secret absent
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -144,10 +151,10 @@ fn missing_secret_reports_problem_and_skips_tls() {
 #[test]
 fn service_not_found_reports_problem() {
     let inputs = Inputs {
-        ingresses: vec![ingress_tls()],
-        services: vec![], // service absent
-        endpointslices: vec![],
-        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![]), // service absent
+        endpointslices: arcs(vec![]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -172,10 +179,10 @@ fn no_ready_endpoints_keeps_cluster_reports_problem() {
         "endpoints": [{ "addresses": ["10.244.0.9"], "conditions": { "ready": false } }]
     }));
     let inputs = Inputs {
-        ingresses: vec![ingress_tls()],
-        services: vec![web_service()],
-        endpointslices: vec![slice],
-        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![slice]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -207,10 +214,10 @@ fn path_types_map_correctly() {
         }
     }));
     let inputs = Inputs {
-        ingresses: vec![ing],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![],
+        ingresses: arcs(vec![ing]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -235,10 +242,10 @@ fn annotated_service(lb: &str, sticky: &str) -> Service {
 #[test]
 fn service_annotations_set_cluster_lb_and_sticky() {
     let inputs = Inputs {
-        ingresses: vec![ingress_tls()],
-        services: vec![annotated_service("least-loaded", "true")],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![annotated_service("least-loaded", "true")]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -260,10 +267,10 @@ fn lb_annotation_is_normalised_and_unknown_defaults_to_round_robin() {
     ];
     for (value, is_p2c) in cases {
         let inputs = Inputs {
-            ingresses: vec![ingress_tls()],
-            services: vec![annotated_service(value, "false")],
-            endpointslices: vec![web_slice()],
-            secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+            ingresses: arcs(vec![ingress_tls()]),
+            services: arcs(vec![annotated_service(value, "false")]),
+            endpointslices: arcs(vec![web_slice()]),
+            secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
             ..Default::default()
         };
         let out = build(&BuildConfig::default(), &inputs);
@@ -280,10 +287,10 @@ fn lb_annotation_is_normalised_and_unknown_defaults_to_round_robin() {
 #[test]
 fn no_annotations_keep_round_robin_no_sticky() {
     let inputs = Inputs {
-        ingresses: vec![ingress_tls()],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -306,10 +313,10 @@ fn service_annotations_set_connection_limit_per_ip() {
         "spec": { "ports": [{ "name": "http", "port": 80, "targetPort": 8080 }] }
     }));
     let inputs = Inputs {
-        ingresses: vec![ingress_tls()],
-        services: vec![svc],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![svc]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -327,10 +334,10 @@ fn non_numeric_connection_limit_is_ignored() {
         "spec": { "ports": [{ "name": "http", "port": 80, "targetPort": 8080 }] }
     }));
     let inputs = Inputs {
-        ingresses: vec![ingress_tls()],
-        services: vec![svc],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![svc]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -341,10 +348,10 @@ fn non_numeric_connection_limit_is_ignored() {
 #[test]
 fn tls_ingress_redirects_http_to_https_by_default() {
     let inputs = Inputs {
-        ingresses: vec![ingress_tls()],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -376,10 +383,10 @@ fn ssl_redirect_can_be_opted_out() {
             .collect(),
     );
     let inputs = Inputs {
-        ingresses: vec![ing],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ingresses: arcs(vec![ing]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -396,10 +403,10 @@ fn ssl_redirect_can_be_opted_out() {
 fn http_only_ingress_is_not_redirected() {
     // No TLS on this Ingress -> nothing to redirect to, so it keeps serving HTTP.
     let inputs = Inputs {
-        ingresses: vec![ingress_tls()], // reuse, but omit the secret below
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![], // cert never loads -> host is not TLS-ready
+        ingresses: arcs(vec![ingress_tls()]), // reuse, but omit the secret below
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![]), // cert never loads -> host is not TLS-ready
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -412,10 +419,10 @@ fn http_only_ingress_is_not_redirected() {
 /// redirect) — the "TLS-ready only with a successfully loaded cert" rule.
 fn assert_invalid_certificate(crt: &str, key: &str) {
     let inputs = Inputs {
-        ingresses: vec![ingress_tls()],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret("demo", "app-tls", crt, key)],
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", crt, key)]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -512,10 +519,10 @@ fn certs_sharing_a_secret_are_merged_with_unioned_names() {
         }
     }));
     let inputs = Inputs {
-        ingresses: vec![ing],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ingresses: arcs(vec![ing]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -565,16 +572,16 @@ fn same_der_cert_with_different_pem_wrapping_is_merged() {
         }))
     };
     let inputs = Inputs {
-        ingresses: vec![
+        ingresses: arcs(vec![
             ingress("a", "a.example.com", "tls-a"),
             ingress("b", "b.example.com", "tls-b"),
-        ],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![
+        ]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![
             tls_secret("demo", "tls-a", CERT_A, KEY_A),
             tls_secret("demo", "tls-b", &rewrapped, KEY_A),
-        ],
+        ]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -637,12 +644,12 @@ fn cross_namespace_host_path_collision_is_reported_on_the_loser() {
     let (svc_a, slice_a) = web_service_in("aaa");
     let (svc_b, slice_b) = web_service_in("bbb");
     let inputs = Inputs {
-        ingresses: vec![
+        ingresses: arcs(vec![
             plain_ingress("bbb", "web", "clash.example.com"),
             plain_ingress("aaa", "web", "clash.example.com"),
-        ],
-        services: vec![svc_a, svc_b],
-        endpointslices: vec![slice_a, slice_b],
+        ]),
+        services: arcs(vec![svc_a, svc_b]),
+        endpointslices: arcs(vec![slice_a, slice_b]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -679,12 +686,12 @@ fn identical_duplicate_routes_are_benign_and_unreported() {
     // Two Ingresses claiming the same host+path with the SAME Service and the
     // same filters are a harmless overlap: one frontend, zero problems.
     let inputs = Inputs {
-        ingresses: vec![
+        ingresses: arcs(vec![
             plain_ingress("demo", "ing-a", "app.example.com"),
             plain_ingress("demo", "ing-b", "app.example.com"),
-        ],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        ]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -707,8 +714,8 @@ fn tcp_services_configmap_maps_to_l4_frontend() {
         }
     }));
     let inputs = Inputs {
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         tcp_services: Some(cm),
         ..Default::default()
     };
@@ -747,9 +754,9 @@ fn default_backend_only_ingress_reports_unsupported() {
         }
     }));
     let inputs = Inputs {
-        ingresses: vec![ing],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        ingresses: arcs(vec![ing]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -768,10 +775,10 @@ fn default_backend_next_to_rules_still_builds_the_rules() {
         "service": { "name": "web", "port": { "number": 80 } }
     })));
     let inputs = Inputs {
-        ingresses: vec![ing],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ingresses: arcs(vec![ing]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -800,9 +807,9 @@ fn ingress_hostless_rule_maps_to_catch_all() {
         }
     }));
     let inputs = Inputs {
-        ingresses: vec![ing],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        ingresses: arcs(vec![ing]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);

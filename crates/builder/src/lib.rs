@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
@@ -73,17 +74,23 @@ impl Default for BuildConfig {
 
 /// Already-fetched cluster objects. The controller pushes everything it watches;
 /// `build` indexes and resolves. Order-independent.
+///
+/// The collections hold `Arc`s so the controller can hand its reflector-cache
+/// entries straight through (kube-rs stores yield `Arc<K>`): the build only
+/// reads them, and deep-cloning every cached object on every reconcile would
+/// cost tens of MB per pass on a busy cluster. `Arc` is plain shared memory —
+/// the crate stays I/O-free.
 #[derive(Default)]
 pub struct Inputs {
-    pub ingresses: Vec<Ingress>,
-    pub services: Vec<Service>,
-    pub endpointslices: Vec<EndpointSlice>,
-    pub secrets: Vec<Secret>,
+    pub ingresses: Vec<Arc<Ingress>>,
+    pub services: Vec<Arc<Service>>,
+    pub endpointslices: Vec<Arc<EndpointSlice>>,
+    pub secrets: Vec<Arc<Secret>>,
     // Gateway API (Phase 2). Empty when only Ingress is in use.
-    pub gateway_classes: Vec<GatewayClass>,
-    pub gateways: Vec<Gateway>,
-    pub http_routes: Vec<HttpRoute>,
-    pub reference_grants: Vec<ReferenceGrant>,
+    pub gateway_classes: Vec<Arc<GatewayClass>>,
+    pub gateways: Vec<Arc<Gateway>>,
+    pub http_routes: Vec<Arc<HttpRoute>>,
+    pub reference_grants: Vec<Arc<ReferenceGrant>>,
     // L4 (TCP/UDP) port→service maps, ingress-nginx style (`"<port>": "ns/svc:port"`).
     pub tcp_services: Option<ConfigMap>,
     pub udp_services: Option<ConfigMap>,
@@ -476,13 +483,16 @@ impl<'a> Index<'a> {
     pub(crate) fn build(inputs: &'a Inputs) -> Self {
         let mut services = BTreeMap::new();
         for svc in &inputs.services {
-            services.insert(meta_nn(&svc.metadata.namespace, &svc.metadata.name), svc);
+            services.insert(
+                meta_nn(&svc.metadata.namespace, &svc.metadata.name),
+                svc.as_ref(),
+            );
         }
         let mut secrets = BTreeMap::new();
         for secret in &inputs.secrets {
             secrets.insert(
                 meta_nn(&secret.metadata.namespace, &secret.metadata.name),
-                secret,
+                secret.as_ref(),
             );
         }
         let mut slices: BTreeMap<(String, String), Vec<&EndpointSlice>> = BTreeMap::new();
@@ -498,7 +508,7 @@ impl<'a> Index<'a> {
                 .as_ref()
                 .and_then(|l| l.get(SERVICE_NAME_LABEL).cloned());
             if let Some(svc) = svc {
-                slices.entry((ns, svc)).or_default().push(slice);
+                slices.entry((ns, svc)).or_default().push(slice.as_ref());
             }
         }
         Self {

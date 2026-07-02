@@ -239,14 +239,6 @@ fn class_is_default(stores: &Stores, class_name: &str) -> bool {
     })
 }
 
-fn collect<K>(store: &Store<K>) -> Vec<K>
-where
-    K: Resource + Clone + 'static,
-    K::DynamicType: Hash + Eq + Clone,
-{
-    store.state().iter().map(|a| (**a).clone()).collect()
-}
-
 /// Find a `namespace/name` ConfigMap in the cache (L4 tcp/udp-services).
 fn lookup_configmap(store: &Store<ConfigMap>, spec: &Option<String>) -> Option<ConfigMap> {
     let (ns, name) = spec.as_ref()?.split_once('/')?;
@@ -394,15 +386,17 @@ async fn reconcile(
         gateway_http_port: args.gateway_http_port,
         gateway_https_port: args.gateway_https_port,
     };
+    // The stores hand out `Arc`s to the cached objects; the builder borrows
+    // them as-is, so a reconcile never deep-clones the whole cluster state.
     let inputs = Inputs {
-        ingresses: collect(&stores.ingresses),
-        services: collect(&stores.services),
-        endpointslices: collect(&stores.endpointslices),
-        secrets: collect(&stores.secrets),
-        gateway_classes: collect(&stores.gateway_classes),
-        gateways: collect(&stores.gateways),
-        http_routes: collect(&stores.http_routes),
-        reference_grants: collect(&stores.reference_grants),
+        ingresses: stores.ingresses.state(),
+        services: stores.services.state(),
+        endpointslices: stores.endpointslices.state(),
+        secrets: stores.secrets.state(),
+        gateway_classes: stores.gateway_classes.state(),
+        gateways: stores.gateways.state(),
+        http_routes: stores.http_routes.state(),
+        reference_grants: stores.reference_grants.state(),
         tcp_services: lookup_configmap(&stores.config_maps, &args.tcp_services_configmap),
         udp_services: lookup_configmap(&stores.config_maps, &args.udp_services_configmap),
     };
@@ -475,7 +469,7 @@ async fn reconcile(
             })
         });
     let gw_addresses = publish_svc
-        .map(status::gateway_addresses)
+        .map(|s| status::gateway_addresses(s))
         .unwrap_or_default();
 
     status::write_status(
@@ -488,7 +482,9 @@ async fn reconcile(
     )
     .await;
 
-    let lb_points = publish_svc.map(status::lb_points).unwrap_or_default();
+    let lb_points = publish_svc
+        .map(|s| status::lb_points(s))
+        .unwrap_or_default();
     status::write_ingress_status(client, &out.results, &lb_points).await;
 
     // Shadow advances only on a successful socket apply. On failure it stays at
