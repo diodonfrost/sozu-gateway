@@ -182,6 +182,126 @@ pub enum Problem {
     },
 }
 
+impl Problem {
+    /// Machine-readable CamelCase reason (the variant name) — the shape
+    /// Kubernetes wants for Event reasons and condition reasons.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Problem::SecretNotFound { .. } => "SecretNotFound",
+            Problem::TlsEntryWithoutSecret => "TlsEntryWithoutSecret",
+            Problem::InvalidCertificate { .. } => "InvalidCertificate",
+            Problem::NonServiceBackend => "NonServiceBackend",
+            Problem::DefaultBackendUnsupported => "DefaultBackendUnsupported",
+            Problem::ServiceNotFound { .. } => "ServiceNotFound",
+            Problem::ServicePortNotFound { .. } => "ServicePortNotFound",
+            Problem::NoReadyEndpoints { .. } => "NoReadyEndpoints",
+            Problem::RouteCollision { .. } => "RouteCollision",
+            Problem::UnsupportedTlsMode { .. } => "UnsupportedTlsMode",
+            Problem::UnsupportedProtocol { .. } => "UnsupportedProtocol",
+            Problem::ListenerPortMismatch { .. } => "ListenerPortMismatch",
+            Problem::WeightedBackendsUnsupported => "WeightedBackendsUnsupported",
+            Problem::ZeroWeightBackendUnsupported { .. } => "ZeroWeightBackendUnsupported",
+            Problem::TimeoutsUnsupported => "TimeoutsUnsupported",
+            Problem::HeaderOrQueryMatchUnsupported => "HeaderOrQueryMatchUnsupported",
+            Problem::NamespaceSelectorUnsupported { .. } => "NamespaceSelectorUnsupported",
+            Problem::FilterUnsupported { .. } => "FilterUnsupported",
+            Problem::BackendRefNotPermitted { .. } => "BackendRefNotPermitted",
+            Problem::InvalidL4Mapping { .. } => "InvalidL4Mapping",
+            Problem::L4PortReserved { .. } => "L4PortReserved",
+        }
+    }
+
+    /// The listener this problem is scoped to, when the variant carries one —
+    /// lets per-listener status conditions cite their own problems.
+    pub fn listener(&self) -> Option<&str> {
+        match self {
+            Problem::ListenerPortMismatch { listener, .. }
+            | Problem::NamespaceSelectorUnsupported { listener } => Some(listener),
+            _ => None,
+        }
+    }
+}
+
+/// Human one-liner carrying the *detail* (which Secret, which Service, which
+/// port) — what status condition messages and Events show to users, so they
+/// can self-diagnose without controller log access.
+impl std::fmt::Display for Problem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Problem::SecretNotFound { secret } => write!(f, "TLS Secret {secret:?} not found"),
+            Problem::TlsEntryWithoutSecret => {
+                write!(f, "Ingress TLS entry has no secretName; its hosts stay plain HTTP")
+            }
+            Problem::InvalidCertificate { secret, reason } => {
+                write!(f, "TLS Secret {secret:?} holds unusable material: {reason}")
+            }
+            Problem::NonServiceBackend => write!(f, "only Service backends are supported"),
+            Problem::DefaultBackendUnsupported => {
+                write!(f, "spec.defaultBackend is not supported and was ignored (rules still apply)")
+            }
+            Problem::ServiceNotFound { service } => {
+                write!(f, "backend Service {service:?} not found")
+            }
+            Problem::ServicePortNotFound { service, port } => {
+                write!(f, "port {port:?} not found on Service {service:?}")
+            }
+            Problem::NoReadyEndpoints { service } => {
+                write!(f, "Service {service:?} has no ready endpoints")
+            }
+            Problem::RouteCollision {
+                hostname,
+                path,
+                winner,
+            } => write!(
+                f,
+                "host+path {hostname}{path} is already served by {winner}; this route was dropped"
+            ),
+            Problem::UnsupportedTlsMode { mode } => {
+                write!(f, "TLS mode {mode:?} is not supported (Terminate only)")
+            }
+            Problem::UnsupportedProtocol { protocol } => {
+                write!(f, "listener protocol {protocol:?} is not supported (HTTP/HTTPS only)")
+            }
+            Problem::ListenerPortMismatch {
+                listener,
+                declared,
+                expected,
+            } => write!(
+                f,
+                "listener {listener:?} declares port {declared} but this gateway only serves the advertised port {expected}"
+            ),
+            Problem::WeightedBackendsUnsupported => {
+                write!(f, "weighted multi-backend splits are not supported (Sōzu cannot weight backends)")
+            }
+            Problem::ZeroWeightBackendUnsupported { service } => write!(
+                f,
+                "backendRef {service:?} with weight 0 cannot be honoured (Sōzu cannot drain by weight); the rule was skipped"
+            ),
+            Problem::TimeoutsUnsupported => {
+                write!(f, "rule.timeouts has no Sōzu equivalent; the rule routes without it")
+            }
+            Problem::HeaderOrQueryMatchUnsupported => {
+                write!(f, "header/query matches are not supported by Sōzu; the rule was skipped")
+            }
+            Problem::NamespaceSelectorUnsupported { listener } => write!(
+                f,
+                "listener {listener:?} uses allowedRoutes.namespaces.from: Selector, which cannot be evaluated; the listener admits no routes (fail closed)"
+            ),
+            Problem::FilterUnsupported { kind } => write!(f, "unsupported filter: {kind}"),
+            Problem::BackendRefNotPermitted { reference } => write!(
+                f,
+                "cross-namespace reference {reference} is not permitted (no ReferenceGrant covers it)"
+            ),
+            Problem::InvalidL4Mapping { entry } => {
+                write!(f, "invalid L4 service mapping: {entry}")
+            }
+            Problem::L4PortReserved { port } => {
+                write!(f, "L4 port {port} is reserved by the gateway's own listeners")
+            }
+        }
+    }
+}
+
 /// Result of one L4 (TCP/UDP) port mapping, for status/logging.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct L4Result {

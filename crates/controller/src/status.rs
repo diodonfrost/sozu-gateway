@@ -17,7 +17,7 @@ use kube::{Api, Client};
 use serde_json::json;
 use tracing::{debug, warn};
 
-use sozu_gw_builder::{GatewayClassResult, GatewayResult, IngressResult, RouteResult};
+use sozu_gw_builder::{GatewayClassResult, GatewayResult, IngressResult, Problem, RouteResult};
 use sozu_gw_gateway_api::gateway::{
     GatewayStatusAddresses, GatewayStatusListeners, GatewayStatusListenersSupportedKinds,
 };
@@ -32,6 +32,28 @@ struct Desired {
     status: bool,
     reason: &'static str,
     message: String,
+}
+
+/// Compose a condition message from problem details, so `kubectl describe`
+/// shows *which* Secret/Service/port is wrong instead of a generic sentence
+/// (the detail otherwise only reaches controller logs). Sorted and deduped —
+/// the message participates in `lastTransitionTime` reuse, so it must be
+/// deterministic across reconciles — and capped so a pathological object
+/// cannot bloat its own status.
+fn problems_message(problems: &[&Problem], fallback: &str) -> String {
+    if problems.is_empty() {
+        return fallback.to_string();
+    }
+    let mut lines: Vec<String> = problems.iter().map(|p| p.to_string()).collect();
+    lines.sort();
+    lines.dedup();
+    const MAX_SHOWN: usize = 5;
+    let extra = lines.len().saturating_sub(MAX_SHOWN);
+    let mut msg = lines[..lines.len().min(MAX_SHOWN)].join("; ");
+    if extra > 0 {
+        msg.push_str(&format!(" (+{extra} more)"));
+    }
+    msg
 }
 
 pub async fn write_status(
@@ -149,25 +171,53 @@ fn build_listeners_status(
                 .iter()
                 .find(|cl| cl.name == l.name)
                 .map(|cl| cl.conditions.as_slice());
+            // Problems that name this listener carry the user-facing detail
+            // for its False conditions.
+            let listener_problems: Vec<&Problem> = gw
+                .problems
+                .iter()
+                .filter(|p| p.listener() == Some(l.name.as_str()))
+                .collect();
             let conditions = build_conditions(
                 &[
                     Desired {
                         type_: "Accepted",
                         status: l.accepted,
                         reason: l.accepted_reason,
-                        message: "Listener accepted by sozu-gateway".to_string(),
+                        message: if l.accepted {
+                            "Listener accepted by sozu-gateway".to_string()
+                        } else {
+                            problems_message(
+                                &listener_problems,
+                                "Listener cannot be accepted as declared",
+                            )
+                        },
                     },
                     Desired {
                         type_: "Programmed",
                         status: l.programmed,
                         reason: l.programmed_reason,
-                        message: "Listener programmed into Sōzu".to_string(),
+                        message: if l.programmed {
+                            "Listener programmed into Sōzu".to_string()
+                        } else {
+                            problems_message(
+                                &listener_problems,
+                                "Listener could not be programmed into Sōzu",
+                            )
+                        },
                     },
                     Desired {
                         type_: "ResolvedRefs",
                         status: l.resolved_refs,
                         reason: l.resolved_refs_reason,
-                        message: "Listener references resolved".to_string(),
+                        message: if l.resolved_refs {
+                            "Listener references resolved".to_string()
+                        } else {
+                            problems_message(
+                                &listener_problems,
+                                "Listener references could not be resolved",
+                            )
+                        },
                     },
                 ],
                 prev,
@@ -201,13 +251,18 @@ async fn write_gateway(
         .status
         .as_ref()
         .and_then(|s| s.conditions.as_deref());
+    let all_problems: Vec<&Problem> = gw.problems.iter().collect();
     let desired = build_conditions(
         &[
             Desired {
                 type_: "Accepted",
                 status: gw.accepted,
                 reason: if gw.accepted { "Accepted" } else { "Invalid" },
-                message: "Accepted by sozu-gateway".to_string(),
+                message: if gw.accepted {
+                    "Accepted by sozu-gateway".to_string()
+                } else {
+                    problems_message(&all_problems, "Gateway rejected")
+                },
             },
             Desired {
                 type_: "Programmed",
@@ -220,7 +275,7 @@ async fn write_gateway(
                 message: if gw.programmed {
                     "Listeners programmed into Sōzu".to_string()
                 } else {
-                    "No listeners could be programmed".to_string()
+                    problems_message(&all_problems, "No listeners could be programmed")
                 },
             },
         ],
@@ -307,6 +362,7 @@ async fn write_route(
                 && p.parent_ref.name == parent.gateway_name
                 && p.parent_ref.namespace.as_deref() == Some(parent.gateway_namespace.as_str())
         });
+        let parent_problems: Vec<&Problem> = parent.problems.iter().collect();
         let conditions = build_conditions(
             &[
                 Desired {
@@ -316,7 +372,7 @@ async fn write_route(
                     message: if parent.accepted {
                         "Route accepted by sozu-gateway".to_string()
                     } else {
-                        "Route does not bind to this parent".to_string()
+                        problems_message(&parent_problems, "Route does not bind to this parent")
                     },
                 },
                 Desired {
@@ -326,7 +382,10 @@ async fn write_route(
                     message: if parent.resolved_refs {
                         "All backend references resolved".to_string()
                     } else {
-                        "One or more backend references could not be resolved".to_string()
+                        problems_message(
+                            &parent_problems,
+                            "One or more backend references could not be resolved",
+                        )
                     },
                 },
             ],
@@ -434,6 +493,32 @@ async fn write_one_ingress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn problems_message_is_deterministic_deduped_and_capped() {
+        assert_eq!(problems_message(&[], "fallback"), "fallback");
+
+        // Order-insensitive and deduped: the message participates in
+        // lastTransitionTime reuse, so it must not flap across reconciles.
+        let a = Problem::ServiceNotFound {
+            service: "z".into(),
+        };
+        let b = Problem::ServiceNotFound {
+            service: "a".into(),
+        };
+        let one = problems_message(&[&a, &b, &a], "");
+        let two = problems_message(&[&b, &a, &b], "");
+        assert_eq!(one, two);
+        assert_eq!(one.matches("\"z\"").count(), 1, "duplicates collapse");
+
+        let many: Vec<Problem> = (0..8)
+            .map(|i| Problem::ServiceNotFound {
+                service: format!("s{i}"),
+            })
+            .collect();
+        let refs: Vec<&Problem> = many.iter().collect();
+        assert!(problems_message(&refs, "").ends_with("(+3 more)"));
+    }
 
     fn svc_with_ips(ips: &[&str]) -> Service {
         let ingress: Vec<_> = ips.iter().map(|ip| json!({ "ip": ip })).collect();

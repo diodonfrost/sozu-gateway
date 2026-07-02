@@ -817,3 +817,26 @@ fn ingress_hostless_rule_maps_to_catch_all() {
     assert_eq!(out.ir.certificates.len(), 0);
     assert!(out.results[0].problems.is_empty(), "{:?}", out.results[0]);
 }
+
+#[test]
+fn problem_display_carries_the_detail_and_reason_stays_machine_readable() {
+    let p = Problem::ServicePortNotFound {
+        service: "demo/web".into(),
+        port: "http".into(),
+    };
+    assert!(p.to_string().contains("demo/web") && p.to_string().contains("http"));
+    assert_eq!(p.reason(), "ServicePortNotFound");
+
+    let p = Problem::ListenerPortMismatch {
+        listener: "https".into(),
+        declared: 8443,
+        expected: 443,
+    };
+    assert!(p.to_string().contains("8443") && p.to_string().contains("443"));
+    assert_eq!(
+        p.listener(),
+        Some("https"),
+        "listener-scoped variants say so"
+    );
+    assert_eq!(Problem::TimeoutsUnsupported.listener(), None);
+}
