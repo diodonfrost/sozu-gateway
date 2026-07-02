@@ -139,12 +139,17 @@ struct Stores {
 
 /// Spawn a watcher+reflector that keeps `writer`'s store fresh and pings `tx`
 /// on every event. Returns the read store.
-fn spawn_watch<K>(api: Api<K>, writer: Writer<K>, tx: mpsc::Sender<()>, kind: &'static str)
-where
+fn spawn_watch<K>(
+    api: Api<K>,
+    cfg: watcher::Config,
+    writer: Writer<K>,
+    tx: mpsc::Sender<()>,
+    kind: &'static str,
+) where
     K: Resource + Clone + DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
     K::DynamicType: Default + Eq + Hash + Clone + std::fmt::Debug + Unpin,
 {
-    let stream = watcher(api, watcher::Config::default())
+    let stream = watcher(api, cfg)
         .default_backoff()
         .reflect(writer)
         .touched_objects();
@@ -522,16 +527,51 @@ async fn main() -> Result<()> {
     // One signal channel fed by every watcher.
     let (tx, mut rx) = mpsc::channel::<()>(64);
 
+    let watch_all = watcher::Config::default;
     let (ingresses, w) = reflector::store();
-    spawn_watch::<Ingress>(Api::all(client.clone()), w, tx.clone(), "ingress");
+    spawn_watch::<Ingress>(
+        Api::all(client.clone()),
+        watch_all(),
+        w,
+        tx.clone(),
+        "ingress",
+    );
     let (ingress_classes, w) = reflector::store();
-    spawn_watch::<IngressClass>(Api::all(client.clone()), w, tx.clone(), "ingressclass");
+    spawn_watch::<IngressClass>(
+        Api::all(client.clone()),
+        watch_all(),
+        w,
+        tx.clone(),
+        "ingressclass",
+    );
     let (services, w) = reflector::store();
-    spawn_watch::<Service>(Api::all(client.clone()), w, tx.clone(), "service");
+    spawn_watch::<Service>(
+        Api::all(client.clone()),
+        watch_all(),
+        w,
+        tx.clone(),
+        "service",
+    );
     let (endpointslices, w) = reflector::store();
-    spawn_watch::<EndpointSlice>(Api::all(client.clone()), w, tx.clone(), "endpointslice");
+    spawn_watch::<EndpointSlice>(
+        Api::all(client.clone()),
+        watch_all(),
+        w,
+        tx.clone(),
+        "endpointslice",
+    );
+    // Only TLS Secrets are of any use to the builder; watching every Secret in
+    // the cluster (SA tokens, Helm release blobs, application secrets) would
+    // cache them all in this process for nothing — maximal memory cost and
+    // maximal blast radius. The field selector bounds both.
     let (secrets, w) = reflector::store();
-    spawn_watch::<Secret>(Api::all(client.clone()), w, tx.clone(), "secret");
+    spawn_watch::<Secret>(
+        Api::all(client.clone()),
+        watch_all().fields("type=kubernetes.io/tls"),
+        w,
+        tx.clone(),
+        "secret",
+    );
 
     // ConfigMaps are only watched when L4 (tcp/udp-services) is configured, so a
     // cluster not using L4 pays no ConfigMap-watch cost.
@@ -539,7 +579,13 @@ async fn main() -> Result<()> {
     let (config_maps, cm_w) = reflector::store();
     if l4_enabled {
         info!("L4 services configured; watching ConfigMaps");
-        spawn_watch::<ConfigMap>(Api::all(client.clone()), cm_w, tx.clone(), "configmap");
+        spawn_watch::<ConfigMap>(
+            Api::all(client.clone()),
+            watch_all(),
+            cm_w,
+            tx.clone(),
+            "configmap",
+        );
     } else {
         drop(cm_w);
     }
@@ -553,10 +599,34 @@ async fn main() -> Result<()> {
     let gateway_api_enabled = gateway_api_available(&client).await?;
     if gateway_api_enabled {
         info!("Gateway API detected; watching gateway.networking.k8s.io resources");
-        spawn_watch::<GatewayClass>(Api::all(client.clone()), gc_w, tx.clone(), "gatewayclass");
-        spawn_watch::<Gateway>(Api::all(client.clone()), gw_w, tx.clone(), "gateway");
-        spawn_watch::<HttpRoute>(Api::all(client.clone()), hr_w, tx.clone(), "httproute");
-        spawn_watch::<ReferenceGrant>(Api::all(client.clone()), rg_w, tx.clone(), "referencegrant");
+        spawn_watch::<GatewayClass>(
+            Api::all(client.clone()),
+            watch_all(),
+            gc_w,
+            tx.clone(),
+            "gatewayclass",
+        );
+        spawn_watch::<Gateway>(
+            Api::all(client.clone()),
+            watch_all(),
+            gw_w,
+            tx.clone(),
+            "gateway",
+        );
+        spawn_watch::<HttpRoute>(
+            Api::all(client.clone()),
+            watch_all(),
+            hr_w,
+            tx.clone(),
+            "httproute",
+        );
+        spawn_watch::<ReferenceGrant>(
+            Api::all(client.clone()),
+            watch_all(),
+            rg_w,
+            tx.clone(),
+            "referencegrant",
+        );
     } else {
         info!("Gateway API CRDs not found; running in Ingress-only mode");
         drop((gc_w, gw_w, hr_w, rg_w));

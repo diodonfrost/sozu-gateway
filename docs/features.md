@@ -21,7 +21,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Ingress | Rule without a host (catch-all) | ❌ | skipped with a reported problem |
 | Ingress | `spec.defaultBackend` | ❌ | not routed; reported as a `DefaultBackendUnsupported` problem |
 | Ingress | `backend.resource` (non-Service backend) | ❌ | only Service backends |
-| TLS | Termination from a `Secret` (`tls.crt`/`tls.key`) | ✅ | works with cert-manager-issued Secrets |
+| TLS | Termination from a `Secret` (`tls.crt`/`tls.key`) | ✅ | `type: kubernetes.io/tls` Secrets only (the controller watches nothing else); works with cert-manager-issued Secrets |
 | TLS | SNI host selection | ✅ | handled by Sōzu |
 | TLS | Wildcard certificate | ✅ | |
 | TLS | Zero-gap certificate rotation | ✅ | `ReplaceCertificate` |
