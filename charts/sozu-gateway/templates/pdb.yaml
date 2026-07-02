@@ -1,0 +1,16 @@
+{{- if gt (int .Values.replicaCount) 1 }}
+# Only rendered with more than one replica: a minAvailable:1 PDB on a
+# singleton can never be satisfied during a voluntary disruption, so it
+# would block node drains forever.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sozu-gateway.fullname" . }}
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "sozu-gateway.selectorLabels" . | nindent 6 }}
+{{- end }}

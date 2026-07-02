@@ -53,6 +53,7 @@ chart-lint:
     helm template {{HELM_RELEASE}} {{CHART}} > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set rbac.allowStatusWrites=true > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true > /dev/null
+    helm template {{HELM_RELEASE}} {{CHART}} --set replicaCount=2 > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set image.controller.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 > /dev/null
 
 # Package the Helm chart into dist/ (use TAG=v<semver>).
