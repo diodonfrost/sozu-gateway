@@ -560,6 +560,65 @@ fn ir_to_requests_with_l4_tcp() {
 }
 
 #[test]
+fn reconcile_tolerates_exact_duplicate_l4_frontends() {
+    // Two sources mapping the same port to the same cluster are a benign
+    // duplicate, exactly like overlapping HTTP frontends: the reconcile must
+    // fold them into one AddTcpFrontend, not hard-fail with
+    // `StateError::Exists` on every cycle.
+    let l4 = ir::L4Frontend {
+        protocol: ir::L4Protocol::Tcp,
+        listener: addr("0.0.0.0:5432"),
+        cluster_id: "pg".into(),
+    };
+    let model = ir::Ir {
+        clusters: vec![cluster("pg", ir::LbAlgorithm::RoundRobin, false)],
+        backends: vec![backend("pg", "10.0.0.1:5432", None)],
+        l4_frontends: vec![l4.clone(), l4],
+        ..Default::default()
+    };
+    let reqs = tr::reconcile(&ir::Ir::default(), &model).expect("exact duplicates must fold");
+    assert_eq!(
+        reqs.iter()
+            .filter(|r| matches!(r.request_type, Some(RequestType::AddTcpFrontend(_))))
+            .count(),
+        1,
+        "exactly one AddTcpFrontend for the deduplicated pair: {reqs:#?}"
+    );
+    assert!(
+        tr::reconcile(&model, &model).expect("idem").is_empty(),
+        "the duplicate-carrying IR must stay idempotent"
+    );
+}
+
+#[test]
+fn reconcile_rejects_conflicting_l4_frontends() {
+    // Same port, DIFFERENT cluster: a real conflict. It must still fail the
+    // reconcile — silently picking a winner would route the port's traffic to
+    // an arbitrary Service.
+    let front = |cluster_id: &str| ir::L4Frontend {
+        protocol: ir::L4Protocol::Tcp,
+        listener: addr("0.0.0.0:5432"),
+        cluster_id: cluster_id.into(),
+    };
+    let model = ir::Ir {
+        clusters: vec![
+            cluster("pg", ir::LbAlgorithm::RoundRobin, false),
+            cluster("redis", ir::LbAlgorithm::RoundRobin, false),
+        ],
+        backends: vec![
+            backend("pg", "10.0.0.1:5432", None),
+            backend("redis", "10.0.0.2:6379", None),
+        ],
+        l4_frontends: vec![front("pg"), front("redis")],
+        ..Default::default()
+    };
+    assert!(
+        tr::reconcile(&ir::Ir::default(), &model).is_err(),
+        "two clusters claiming one L4 port must fail, not pick a winner"
+    );
+}
+
+#[test]
 fn reconcile_adds_then_removes_l4_route() {
     let model = ir::Ir {
         clusters: vec![cluster("pg", ir::LbAlgorithm::RoundRobin, false)],

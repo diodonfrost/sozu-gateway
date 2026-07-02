@@ -19,7 +19,7 @@
 //! the otherwise HashSet-ordered routing diff deterministic.
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 
 use sozu_command_lib::proto::command::{
@@ -39,6 +39,8 @@ pub enum TranslatorError {
     Dispatch(String),
     #[error("invalid certificate (cannot compute fingerprint): {0}")]
     Certificate(String),
+    #[error("conflicting L4 frontends: {0}")]
+    L4Conflict(String),
 }
 
 // ----------------------------------------------------------------------------
@@ -322,6 +324,37 @@ fn l4_frontend_request(f: &ir::L4Frontend) -> Request {
     }
 }
 
+/// L4 frontends deduplicated by exact identity (protocol + listener +
+/// cluster). Like [`unique_frontends`], a benign duplicate — two sources
+/// mapping the same port to the same cluster — must not hard-fail the whole
+/// reconcile with `StateError::Exists`. First occurrence wins. Only *exact*
+/// duplicates collapse; conflicting claims are [`check_l4_conflicts`]' job.
+fn unique_l4_frontends(l4: &[ir::L4Frontend]) -> Vec<&ir::L4Frontend> {
+    let mut seen: BTreeSet<(ir::L4Protocol, SocketAddr, &str)> = BTreeSet::new();
+    l4.iter()
+        .filter(|f| seen.insert((f.protocol, f.listener, f.cluster_id.as_str())))
+        .collect()
+}
+
+/// Reject two L4 frontends claiming one listen address for *different*
+/// clusters. At L4 there is no host multiplexing — one address routes to
+/// exactly one cluster — and `ConfigState` buckets TCP/UDP frontends by
+/// cluster, so the fold alone would accept both claims and silently program
+/// an ambiguous route. Expects an exact-deduplicated slice: any repeated
+/// (protocol, listener) key left is a conflict.
+fn check_l4_conflicts(l4: &[&ir::L4Frontend]) -> Result<(), TranslatorError> {
+    let mut claims: BTreeMap<(ir::L4Protocol, SocketAddr), &str> = BTreeMap::new();
+    for f in l4 {
+        if let Some(other) = claims.insert((f.protocol, f.listener), f.cluster_id.as_str()) {
+            return Err(TranslatorError::L4Conflict(format!(
+                "{} ({:?}) is claimed by both cluster {other:?} and cluster {:?}",
+                f.listener, f.protocol, f.cluster_id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// `AddTcpListener`/`AddUdpListener` for each distinct L4 listen address (active,
 /// so `ConfigState::diff` derives the matching `ActivateListener`).
 fn l4_listener_adds(l4: &[ir::L4Frontend]) -> Vec<Request> {
@@ -456,8 +489,10 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
     // L4: listeners (active=true, so diff derives ActivateListener) + frontends.
     // No explicit ActivateListener here — dispatching it would need the listener
     // to already exist in this transient state, and the diff handles activation.
+    let l4 = unique_l4_frontends(&ir.l4_frontends);
+    check_l4_conflicts(&l4)?;
     requests.extend(l4_listener_adds(&ir.l4_frontends));
-    requests.extend(ir.l4_frontends.iter().map(l4_frontend_request));
+    requests.extend(l4.into_iter().map(l4_frontend_request));
     let mut state = ConfigState::new();
     for req in canonicalize(requests) {
         state
@@ -557,7 +592,11 @@ pub fn ir_to_requests(ir: &ir::Ir) -> Vec<Request> {
     // L4: add the listener, activate it, then attach the frontend (tiered).
     requests.extend(l4_listener_adds(&ir.l4_frontends));
     requests.extend(l4_listener_activations(&ir.l4_frontends));
-    requests.extend(ir.l4_frontends.iter().map(l4_frontend_request));
+    requests.extend(
+        unique_l4_frontends(&ir.l4_frontends)
+            .into_iter()
+            .map(l4_frontend_request),
+    );
     canonicalize(requests)
 }
 
