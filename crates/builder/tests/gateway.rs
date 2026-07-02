@@ -1,6 +1,7 @@
 //! Behavioural tests for the Gateway API -> IR mapping (Phase 2).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use k8s_openapi::api::core::v1::{Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
@@ -18,6 +19,12 @@ const KEY_A: &str = include_str!("fixtures/key_a.pem");
 
 fn from_json<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
     serde_json::from_value(v).expect("valid k8s object json")
+}
+
+/// Wrap plain objects in the `Arc`s `Inputs` borrows (the controller passes
+/// its reflector-cache `Arc`s straight through).
+fn arcs<T>(items: Vec<T>) -> Vec<Arc<T>> {
+    items.into_iter().map(Arc::new).collect()
 }
 
 fn web_service() -> Service {
@@ -108,11 +115,11 @@ fn route_to_web(extra_backend: bool) -> HttpRoute {
 #[test]
 fn http_route_maps_to_ir() {
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![http_gateway()],
-        http_routes: vec![route_to_web(false)],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![route_to_web(false)]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -133,12 +140,12 @@ fn http_route_maps_to_ir() {
 #[test]
 fn https_listener_loads_cert() {
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![https_gateway()],
-        http_routes: vec![route_to_web(false)],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![https_gateway()]),
+        http_routes: arcs(vec![route_to_web(false)]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -152,11 +159,11 @@ fn https_listener_loads_cert() {
 #[test]
 fn other_controller_is_ignored() {
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("other.io/controller")],
-        gateways: vec![http_gateway()],
-        http_routes: vec![route_to_web(false)],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("other.io/controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![route_to_web(false)]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -174,11 +181,11 @@ fn other_controller_is_ignored() {
 #[test]
 fn weighted_backends_are_unsupported() {
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![http_gateway()],
-        http_routes: vec![route_to_web(true)], // two backendRefs
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![route_to_web(true)]), // two backendRefs
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -319,11 +326,11 @@ fn http_route_filters_map_to_ir() {
         }
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![http_gateway()],
-        http_routes: vec![route],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -373,11 +380,11 @@ fn redirect_filter_supported_and_unsupported_reported() {
         }
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![http_gateway()],
-        http_routes: vec![route],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -430,12 +437,12 @@ fn ingress_colliding_with_redirect_only_route_reports_the_ingress() {
         }]}
     }));
     let inputs = Inputs {
-        ingresses: vec![ingress],
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![http_gateway()],
-        http_routes: vec![route],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        ingresses: arcs(vec![ingress]),
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -481,11 +488,11 @@ fn losing_route_parent_is_not_accepted_with_route_collision_reason() {
         }
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![http_gateway()],
-        http_routes: vec![route_to_web(false), redirect],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![route_to_web(false), redirect]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -552,11 +559,11 @@ fn collision_lands_on_the_parent_ref_that_produced_the_frontend() {
         }
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
-        http_routes: vec![route, redirect],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route, redirect]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -598,12 +605,12 @@ fn gateway_and_ingress_share_one_cluster() {
         }]}
     }));
     let inputs = Inputs {
-        ingresses: vec![ingress],
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![http_gateway()],
-        http_routes: vec![route_to_web(false)],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        ingresses: arcs(vec![ingress]),
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![route_to_web(false)]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -630,11 +637,11 @@ fn gateway_hostless_route_maps_to_catch_all() {
         }
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![http_gateway()],
-        http_routes: vec![route],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -669,11 +676,11 @@ fn route_hostname_not_matching_listener_is_silently_skipped() {
         }
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
-        http_routes: vec![route],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -704,11 +711,11 @@ fn wildcard_route_on_specific_listener_narrows_to_the_listener_hostname() {
         }
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
-        http_routes: vec![route],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -737,11 +744,11 @@ fn specific_route_on_wildcard_listener_uses_the_route_hostname() {
         }
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
-        http_routes: vec![route],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -754,12 +761,12 @@ fn specific_route_on_wildcard_listener_uses_the_route_hostname() {
 fn equal_route_and_listener_hostname_is_programmed_unchanged() {
     // https_gateway() pins app.example.com; the route serves the same name.
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![https_gateway()],
-        http_routes: vec![route_to_web(false)],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![https_gateway()]),
+        http_routes: arcs(vec![route_to_web(false)]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -769,11 +776,11 @@ fn equal_route_and_listener_hostname_is_programmed_unchanged() {
 
 fn inputs_with(route: HttpRoute) -> Inputs {
     Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![http_gateway()],
-        http_routes: vec![route],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     }
 }
@@ -881,11 +888,11 @@ fn cross_namespace_route_to_all_listener_is_accepted() {
         }
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
-        http_routes: vec![route],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -924,11 +931,11 @@ fn selector_listener_fails_closed_and_is_reported() {
         }
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
-        http_routes: vec![cross_ns_route, same_ns_route],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![cross_ns_route, same_ns_route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -966,12 +973,12 @@ fn selector_https_listener_loads_no_certificates() {
         }]}
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
-        http_routes: vec![route_to_web(false)],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route_to_web(false)]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -1013,11 +1020,11 @@ fn listener_port_mismatch_is_reported_and_not_programmed() {
         }
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
-        http_routes: vec![route],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -1064,11 +1071,11 @@ fn listener_on_the_advertised_port_is_programmed() {
         }
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
-        http_routes: vec![route],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let cfg = BuildConfig {
@@ -1099,12 +1106,12 @@ fn standard_gateway_ports_are_accepted_on_unprivileged_binds() {
         ]}
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
-        http_routes: vec![route_to_web(false)],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
-        secrets: vec![tls_secret()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route_to_web(false)]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret()]),
         ..Default::default()
     };
     let cfg = BuildConfig {
@@ -1143,11 +1150,11 @@ fn gateway_listener_status_counts_attached_routes() {
         }
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
-        http_routes: vec![route],
-        services: vec![web_service()],
-        endpointslices: vec![web_slice()],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -1177,8 +1184,8 @@ fn gateway_listener_invalid_route_kind() {
         ]}
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -1203,8 +1210,8 @@ fn cross_namespace_cert_without_grant_is_ref_not_permitted() {
         }]}
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
@@ -1227,15 +1234,15 @@ fn cert_grant_with_wrong_from_group_is_not_permitted() {
         }]}
     }));
     let inputs = Inputs {
-        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
-        gateways: vec![gw],
-        reference_grants: vec![from_json(json!({
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        reference_grants: arcs(vec![from_json(json!({
             "metadata": { "name": "g", "namespace": "certs" },
             "spec": {
                 "from": [{ "group": "wrong.group", "kind": "Gateway", "namespace": "demo" }],
                 "to": [{ "group": "", "kind": "Secret" }]
             }
-        }))],
+        }))]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
