@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sozu_gw_agent::{QueryMetricsOptions, SozuAgentHandle};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tracing::{debug, error, warn};
@@ -147,7 +147,7 @@ async fn serve_one(
     self_metrics: &SelfMetrics,
 ) -> std::io::Result<()> {
     let mut buf = [0u8; 256];
-    let n = sock.read(&mut buf).await?;
+    let n = crate::health::read_head(sock, &mut buf).await?;
     let (status, content_type, body): (&str, &str, String) =
         match crate::health::request_path(&buf[..n]) {
             Some("/metrics") => metrics_response(agent, scrape_permit, self_metrics).await,
@@ -245,6 +245,28 @@ mod tests {
             body, "metrics unavailable\n",
             "with the permit free the query must reach the agent"
         );
+    }
+
+    /// Same bounded-read guarantee as the health server: a scraper that
+    /// connects and never sends must not park a task + fd forever.
+    #[tokio::test(start_paused = true)]
+    async fn silent_connection_times_out_instead_of_parking() {
+        let agent = SozuAgentHandle::spawn("/nonexistent/sozu.sock").expect("spawn agent");
+        let scrape_permit = Semaphore::new(1);
+        let self_metrics = SelfMetrics::default();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (mut sock, _) = listener.accept().await.expect("accept");
+
+        let err = serve_one(&mut sock, &agent, &scrape_permit, &self_metrics)
+            .await
+            .expect_err("a silent connection must not be served");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        drop(client);
     }
 
     #[test]

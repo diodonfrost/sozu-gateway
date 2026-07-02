@@ -1,6 +1,6 @@
 apiVersion: v2
 name: sozu-gateway
-description: Sōzu-based Ingress controller + API gateway add-on (Phase 1).
+description: Sōzu-based Ingress + Gateway API controller and API gateway add-on.
 type: application
 # Placeholder — the release workflow overrides version/appVersion at package
 # time from the git tag (e.g. v0.2.0 -> chart 0.2.0, appVersion v0.2.0).

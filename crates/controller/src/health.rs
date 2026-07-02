@@ -12,10 +12,24 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, warn};
+
+/// Bound on reading the request head. A client that connects and never sends
+/// would otherwise park one tokio task + fd per connection, forever. Shared
+/// with the `metrics` module's identical hand-rolled server.
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// One `read` bounded by [`READ_TIMEOUT`], as an ordinary I/O error so the
+/// callers' single error path handles it.
+pub(crate) async fn read_head(sock: &mut TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
+    tokio::time::timeout(READ_TIMEOUT, sock.read(buf))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "request read timed out"))?
+}
 
 /// Spawn the health server as a background task. On a bind failure it logs and
 /// gives up (health is an operability aid, never a reason to kill routing).
@@ -48,7 +62,7 @@ pub fn spawn(addr: SocketAddr, ready: Arc<AtomicBool>) {
 async fn serve_one(sock: &mut TcpStream, ready: &AtomicBool) -> std::io::Result<()> {
     // Probes send a tiny request; one read is enough to see the request line.
     let mut buf = [0u8; 256];
-    let n = sock.read(&mut buf).await?;
+    let n = read_head(sock, &mut buf).await?;
     let (status, body): (&str, &str) = match request_path(&buf[..n]) {
         Some("/readyz") => {
             if ready.load(Ordering::Relaxed) {
@@ -86,6 +100,26 @@ pub(crate) fn request_path(head: &[u8]) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::request_path;
+
+    /// A client that connects and never sends a byte must get a bounded
+    /// timeout error, not park the serving task (and its fd) forever.
+    /// `start_paused` fast-forwards the timer, so the test is instant.
+    #[tokio::test(start_paused = true)]
+    async fn silent_connection_times_out_instead_of_parking() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (mut sock, _) = listener.accept().await.expect("accept");
+
+        let ready = std::sync::atomic::AtomicBool::new(false);
+        let err = super::serve_one(&mut sock, &ready)
+            .await
+            .expect_err("a silent connection must not be served");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        drop(client);
+    }
 
     #[test]
     fn parses_request_target() {
