@@ -337,6 +337,13 @@ pub struct BuildOutput {
     pub routes: Vec<RouteResult>,
     /// L4 (TCP/UDP) port-mapping results.
     pub l4_results: Vec<L4Result>,
+    /// `namespace/name` of every Service some route (Ingress, HTTPRoute or L4
+    /// mapping) referenced — whether or not it resolved. Failed targets
+    /// (`ServiceNotFound`, `NoReadyEndpoints`, …) are included on purpose: an
+    /// EndpointSlice appearing later for a still-broken backend must count as
+    /// relevant. The controller uses this set to ignore EndpointSlice churn
+    /// from workloads no route cares about.
+    pub referenced_services: BTreeSet<String>,
 }
 
 /// A reference to a Service port from an Ingress backend: by number or by name.
@@ -398,6 +405,32 @@ fn tls_covers(tls_hosts: &BTreeSet<String>, host: &str) -> bool {
                 .is_some_and(|label| !label.is_empty() && !label.contains('.'))
         })
     })
+}
+
+/// The `(namespace, service)` an EndpointSlice feeds, per its
+/// `kubernetes.io/service-name` label — the only linkage the build uses.
+/// `None` when the label is absent: such a slice is invisible to the build.
+fn slice_service(slice: &EndpointSlice) -> Option<(String, String)> {
+    let svc = slice
+        .metadata
+        .labels
+        .as_ref()?
+        .get(SERVICE_NAME_LABEL)?
+        .clone();
+    let ns = slice
+        .metadata
+        .namespace
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    Some((ns, svc))
+}
+
+/// The `namespace/name` key of the Service an EndpointSlice feeds, in the
+/// spelling of [`BuildOutput::referenced_services`]. `None` when the
+/// `kubernetes.io/service-name` label is absent — the build never reads such
+/// a slice, so it can never affect the output.
+pub fn slice_service_key(slice: &EndpointSlice) -> Option<String> {
+    slice_service(slice).map(|(ns, svc)| format!("{ns}/{svc}"))
 }
 
 /// PEM labels we accept for `tls.key` (PKCS#8, PKCS#1 and SEC1).
@@ -497,18 +530,8 @@ impl<'a> Index<'a> {
         }
         let mut slices: BTreeMap<(String, String), Vec<&EndpointSlice>> = BTreeMap::new();
         for slice in &inputs.endpointslices {
-            let ns = slice
-                .metadata
-                .namespace
-                .clone()
-                .unwrap_or_else(|| "default".to_string());
-            let svc = slice
-                .metadata
-                .labels
-                .as_ref()
-                .and_then(|l| l.get(SERVICE_NAME_LABEL).cloned());
-            if let Some(svc) = svc {
-                slices.entry((ns, svc)).or_default().push(slice.as_ref());
+            if let Some(key) = slice_service(slice) {
+                slices.entry(key).or_default().push(slice.as_ref());
             }
         }
         Self {
@@ -652,10 +675,14 @@ pub(crate) fn add_service_route(
     index: &Index,
     clusters: &mut BTreeMap<String, ir::Cluster>,
     backends: &mut BTreeMap<String, ir::Backend>,
+    referenced: &mut BTreeSet<String>,
     namespace: &str,
     service: &str,
     port_ref: &PortRef,
 ) -> Result<(String, bool), Problem> {
+    // Recorded before resolution, success or failure alike: an EndpointSlice
+    // appearing later for a still-broken target must read as relevant.
+    referenced.insert(format!("{namespace}/{service}"));
     let (cluster_id, _port, addrs) = resolve_backends(index, namespace, service, port_ref)?;
     let svc = index
         .services
@@ -859,6 +886,7 @@ fn build_l4(
     index: &Index,
     clusters: &mut BTreeMap<String, ir::Cluster>,
     backends: &mut BTreeMap<String, ir::Backend>,
+    referenced: &mut BTreeSet<String>,
     inputs: &Inputs,
 ) -> (Vec<ir::L4Frontend>, Vec<L4Result>) {
     let mut l4_frontends = Vec::new();
@@ -881,7 +909,9 @@ fn build_l4(
                     problems.push(Problem::L4PortReserved { port })
                 }
                 Some((port, ns, svc, port_ref)) => {
-                    match add_service_route(index, clusters, backends, &ns, &svc, &port_ref) {
+                    match add_service_route(
+                        index, clusters, backends, referenced, &ns, &svc, &port_ref,
+                    ) {
                         Ok((cluster_id, has_endpoints)) => {
                             if !has_endpoints {
                                 problems.push(Problem::NoReadyEndpoints { service: svc });
@@ -916,6 +946,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
     let mut frontends: Vec<SourcedFrontend> = Vec::new();
     let mut certificates: Vec<FingerprintedCert> = Vec::new();
     let mut results: Vec<IngressResult> = Vec::new();
+    let mut referenced: BTreeSet<String> = BTreeSet::new();
 
     for ingress in &inputs.ingresses {
         if !is_ours(ingress, cfg) {
@@ -1021,6 +1052,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                     &index,
                     &mut clusters,
                     &mut backends,
+                    &mut referenced,
                     &namespace,
                     &svc_backend.name,
                     &port_ref,
@@ -1095,6 +1127,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         &index,
         &mut clusters,
         &mut backends,
+        &mut referenced,
         &mut frontends,
         &mut certificates,
     );
@@ -1167,8 +1200,14 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
     });
 
     // L4 (TCP/UDP): same Service→pod-IP resolver, into the same clusters/backends.
-    let (mut l4_frontends, l4_results) =
-        build_l4(cfg, &index, &mut clusters, &mut backends, inputs);
+    let (mut l4_frontends, l4_results) = build_l4(
+        cfg,
+        &index,
+        &mut clusters,
+        &mut backends,
+        &mut referenced,
+        inputs,
+    );
     l4_frontends.sort_by_key(|f| (f.protocol, f.listener));
 
     BuildOutput {
@@ -1184,5 +1223,6 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         gateways: gw.gateways,
         routes: gw.routes,
         l4_results,
+        referenced_services: referenced,
     }
 }

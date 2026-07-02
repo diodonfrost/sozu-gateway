@@ -86,5 +86,8 @@ expression: out
   "gateway_classes": [],
   "gateways": [],
   "routes": [],
-  "l4_results": []
+  "l4_results": [],
+  "referenced_services": [
+    "demo/web"
+  ]
 }

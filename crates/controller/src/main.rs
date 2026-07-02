@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::hash::Hash;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -139,7 +139,7 @@ struct Stores {
 }
 
 /// Spawn a watcher+reflector that keeps `writer`'s store fresh and pings `tx`
-/// on every event. Returns the read store.
+/// on every event.
 fn spawn_watch<K>(
     api: Api<K>,
     cfg: watcher::Config,
@@ -150,6 +150,25 @@ fn spawn_watch<K>(
     K: Resource + Clone + DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
     K::DynamicType: Default + Eq + Hash + Clone + std::fmt::Debug + Unpin,
 {
+    spawn_watch_filtered(api, cfg, writer, tx, kind, |_: &K| true)
+}
+
+/// [`spawn_watch`] with a ping predicate: the reflector cache is kept fresh
+/// for **every** event — the filter never touches `.reflect` — but only
+/// objects `relevant` accepts wake the reconcile loop. Used by the
+/// EndpointSlice watch, where churn from unrelated workloads dominates.
+fn spawn_watch_filtered<K, F>(
+    api: Api<K>,
+    cfg: watcher::Config,
+    writer: Writer<K>,
+    tx: mpsc::Sender<()>,
+    kind: &'static str,
+    relevant: F,
+) where
+    K: Resource + Clone + DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
+    K::DynamicType: Default + Eq + Hash + Clone + std::fmt::Debug + Unpin,
+    F: Fn(&K) -> bool + Send + 'static,
+{
     let stream = watcher(api, cfg)
         .default_backoff()
         .reflect(writer)
@@ -158,8 +177,10 @@ fn spawn_watch<K>(
         futures::pin_mut!(stream);
         loop {
             match stream.next().await {
-                Some(Ok(_)) => {
-                    let _ = tx.try_send(());
+                Some(Ok(obj)) => {
+                    if relevant(&obj) {
+                        let _ = tx.try_send(());
+                    }
                 }
                 Some(Err(e)) => warn!(watch = kind, error = %e, "watch error (will retry)"),
                 None => {
@@ -175,6 +196,25 @@ fn spawn_watch<K>(
             }
         }
     });
+}
+
+/// Should an EndpointSlice event wake the reconcile loop? Only when its
+/// Service (`kubernetes.io/service-name` label + namespace) is one the last
+/// build referenced — resolved or not. Endpoint churn from unrelated
+/// workloads is the dominant wakeup source on a busy cluster, and every
+/// wakeup is a full rebuild.
+///
+/// An empty set passes everything: before the first build has populated it,
+/// a missed wakeup is an outage risk while a spurious one only costs CPU
+/// (and a cluster whose build genuinely references nothing rebuilds an empty
+/// state, which is cheap). A slice without the service-name label never
+/// pings — the builder cannot attribute it to any Service, so it can never
+/// change the build output.
+fn slice_pings(referenced: &BTreeSet<String>, slice: &EndpointSlice) -> bool {
+    if referenced.is_empty() {
+        return true;
+    }
+    sozu_gw_builder::slice_service_key(slice).is_some_and(|key| referenced.contains(&key))
 }
 
 /// Await a store's readiness only when its watcher was actually spawned.
@@ -376,6 +416,7 @@ async fn reconcile(
     agent: &SozuAgentHandle,
     shadow: &mut Ir,
     problem_events: &mut events::ProblemEvents,
+    referenced_services: &RwLock<BTreeSet<String>>,
 ) -> Result<()> {
     let cfg = BuildConfig {
         class_name: args.class_name.clone(),
@@ -402,6 +443,15 @@ async fn reconcile(
     };
 
     let out = build(&cfg, &inputs);
+
+    // Publish the Services this build referenced (resolved or not) for the
+    // EndpointSlice ping filter — before and independent of the apply:
+    // relevance follows the *desired* state, not whether the socket push
+    // succeeds.
+    *referenced_services
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = out.referenced_services.clone();
+
     for r in &out.results {
         if !r.problems.is_empty() {
             warn!(namespace = %r.namespace, name = %r.name, problems = ?r.problems, "ingress has problems");
@@ -545,6 +595,14 @@ async fn main() -> Result<()> {
     // One signal channel fed by every watcher.
     let (tx, mut rx) = mpsc::channel::<()>(64);
 
+    // `namespace/name` of the Services the last build referenced, shared with
+    // the EndpointSlice watcher so endpoint churn from unrelated workloads —
+    // the dominant wakeup source on a busy cluster — stops triggering full
+    // rebuilds. Empty until the first build; `slice_pings` then passes
+    // everything, since a missed wakeup is an outage risk while a spurious
+    // one only costs CPU.
+    let referenced_services: Arc<RwLock<BTreeSet<String>>> = Arc::new(RwLock::new(BTreeSet::new()));
+
     let watch_all = watcher::Config::default;
     let (ingresses, w) = reflector::store();
     spawn_watch::<Ingress>(
@@ -571,12 +629,17 @@ async fn main() -> Result<()> {
         "service",
     );
     let (endpointslices, w) = reflector::store();
-    spawn_watch::<EndpointSlice>(
+    let ping_set = referenced_services.clone();
+    spawn_watch_filtered::<EndpointSlice, _>(
         Api::all(client.clone()),
         watch_all(),
         w,
         tx.clone(),
         "endpointslice",
+        move |slice| {
+            let set = ping_set.read().unwrap_or_else(|e| e.into_inner());
+            slice_pings(&set, slice)
+        },
     );
     // Only TLS Secrets are of any use to the builder; watching every Secret in
     // the cluster (SA tokens, Helm release blobs, application secrets) would
@@ -742,6 +805,7 @@ async fn main() -> Result<()> {
         &agent,
         &mut shadow,
         &mut problem_events,
+        &referenced_services,
     )
     .await
     {
@@ -822,6 +886,7 @@ async fn main() -> Result<()> {
             &agent,
             &mut shadow,
             &mut problem_events,
+            &referenced_services,
         )
         .await
         {
@@ -862,6 +927,62 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An EndpointSlice labelled for `svc` in `ns` (`None` omits the piece).
+    fn slice(ns: Option<&str>, svc: Option<&str>) -> EndpointSlice {
+        EndpointSlice {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("slice-1".to_string()),
+                namespace: ns.map(str::to_string),
+                labels: svc.map(|s| {
+                    [("kubernetes.io/service-name".to_string(), s.to_string())]
+                        .into_iter()
+                        .collect()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn set(keys: &[&str]) -> BTreeSet<String> {
+        keys.iter().map(|k| k.to_string()).collect()
+    }
+
+    #[test]
+    fn slice_pings_only_for_referenced_services() {
+        let referenced = set(&["demo/web", "prod/api"]);
+        // The slice's service is referenced: ping.
+        assert!(slice_pings(&referenced, &slice(Some("demo"), Some("web"))));
+        // Same name in another namespace, or another service: no ping — this
+        // is exactly the unrelated churn the filter exists to drop.
+        assert!(!slice_pings(&referenced, &slice(Some("prod"), Some("web"))));
+        assert!(!slice_pings(
+            &referenced,
+            &slice(Some("demo"), Some("other"))
+        ));
+        // No service-name label: the builder cannot attribute the slice to
+        // any Service, so it can never change the build — no ping.
+        assert!(!slice_pings(&referenced, &slice(Some("demo"), None)));
+    }
+
+    #[test]
+    fn slice_pings_defaults_the_namespace_like_the_builder() {
+        // A namespace-less slice must match the builder's `default` fallback,
+        // or a referenced default-namespace Service would stop waking us.
+        let referenced = set(&["default/web"]);
+        assert!(slice_pings(&referenced, &slice(None, Some("web"))));
+    }
+
+    #[test]
+    fn empty_referenced_set_passes_every_slice() {
+        // Before the first build populates the set, a missed wakeup is an
+        // outage risk; everything — even unattributable slices — must ping.
+        let empty = BTreeSet::new();
+        assert!(slice_pings(&empty, &slice(Some("demo"), Some("web"))));
+        assert!(slice_pings(&empty, &slice(Some("demo"), None)));
+        assert!(slice_pings(&empty, &slice(None, None)));
+    }
 
     #[tokio::test]
     async fn unwatched_store_is_trivially_ready() {

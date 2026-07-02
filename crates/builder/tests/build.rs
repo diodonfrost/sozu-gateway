@@ -741,6 +741,49 @@ fn tcp_services_configmap_maps_to_l4_frontend() {
 }
 
 #[test]
+fn referenced_services_cover_resolved_and_unresolved_backends() {
+    // The EndpointSlice ping filter feeds on this set: a Service must be in it
+    // whether it resolved or not — a slice appearing later for a still-broken
+    // backend (ServiceNotFound, NoReadyEndpoints) has to wake the loop, or a
+    // deploy that fixes the backend would never be routed to.
+    let broken: Ingress = from_json(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": { "name": "ghost", "namespace": "demo" },
+        "spec": {
+            "ingressClassName": "sozu",
+            "rules": [{
+                "host": "ghost.example.com",
+                "http": { "paths": [
+                    { "path": "/", "pathType": "Prefix",
+                      "backend": { "service": { "name": "ghost", "port": { "number": 80 } } } }
+                ]}
+            }]
+        }
+    }));
+    let cm: ConfigMap = from_json(json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
+        "data": { "5432": "db/postgres:5432" } // service absent -> still referenced
+    }));
+    let inputs = Inputs {
+        ingresses: arcs(vec![ingress_tls(), broken]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
+        tcp_services: Some(cm),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    let referenced: Vec<&str> = out.referenced_services.iter().map(|s| s.as_str()).collect();
+    assert_eq!(
+        referenced,
+        vec!["db/postgres", "demo/ghost", "demo/web"],
+        "resolved (Ingress), unresolved (Ingress) and L4 targets all count"
+    );
+}
+
+#[test]
 fn default_backend_only_ingress_reports_unsupported() {
     // spec.defaultBackend has no verified Sōzu mapping: an Ingress made of
     // only a defaultBackend builds to nothing, so the owner must see WHY
