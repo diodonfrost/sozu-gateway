@@ -21,7 +21,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
 
       - name: Install just
-        run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/local/bin
+        uses: ./.github/actions/install-just
 
       - name: Cache cargo
         uses: actions/cache@v6
@@ -47,7 +47,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v4
       - name: Install just
-        run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/local/bin
+        uses: ./.github/actions/install-just
       - name: Helm lint + template
         run: just chart-lint
 
@@ -56,6 +56,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install just
-        run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/local/bin
+        uses: ./.github/actions/install-just
       - name: Build controller image
         run: just IMAGE=sozu-gw-controller TAG=ci image

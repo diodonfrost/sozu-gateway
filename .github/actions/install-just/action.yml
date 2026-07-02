@@ -1,0 +1,20 @@
+name: Install just
+description: >
+  Install a pinned, checksum-verified `just` release. Every workflow goes
+  through this action so the version and its trust anchor live in one place —
+  never a `curl | sudo bash` of a mutable script.
+runs:
+  using: composite
+  steps:
+    - name: Install just (pinned, checksum-verified)
+      shell: bash
+      run: |
+        set -euo pipefail
+        VERSION="1.55.1"
+        SHA256="b0ef600f0df20d5ae91ae931627c499fc52b477ffe5f5ea7b7b3ec616b16c778"
+        curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/just.tar.gz \
+          "https://github.com/casey/just/releases/download/${VERSION}/just-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+        echo "${SHA256}  /tmp/just.tar.gz" | sha256sum -c -
+        tar -C /tmp -xzf /tmp/just.tar.gz just
+        sudo install -m 0755 /tmp/just /usr/local/bin/just
+        just --version
