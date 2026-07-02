@@ -175,6 +175,7 @@ mod tests {
             gateways: vec![],
             routes: vec![],
             l4_results: vec![],
+            referenced_services: Default::default(),
         }
     }
 

@@ -786,6 +786,37 @@ fn inputs_with(route: HttpRoute) -> Inputs {
 }
 
 #[test]
+fn referenced_services_cover_httproute_backends_resolved_or_not() {
+    // Two rules: one resolves to `web`, one targets a Service that does not
+    // exist. Both must land in `referenced_services` — the EndpointSlice ping
+    // filter feeds on it, and a slice appearing later for the still-missing
+    // backend has to wake the reconcile loop.
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [
+                { "matches": [{ "path": { "type": "PathPrefix", "value": "/" } }],
+                  "backendRefs": [{ "name": "web", "port": 80 }] },
+                { "matches": [{ "path": { "type": "PathPrefix", "value": "/missing" } }],
+                  "backendRefs": [{ "name": "missing", "port": 80 }] }
+            ]
+        }
+    }));
+    let out = build(&BuildConfig::default(), &inputs_with(route));
+
+    let referenced: Vec<&str> = out.referenced_services.iter().map(|s| s.as_str()).collect();
+    assert_eq!(referenced, vec!["demo/missing", "demo/web"]);
+    // Sanity: the second backend really did fail to resolve.
+    assert!(out.routes[0].parents[0]
+        .problems
+        .contains(&Problem::ServiceNotFound {
+            service: "missing".to_string()
+        }));
+}
+
+#[test]
 fn parentref_section_name_not_matching_listener_is_not_accepted() {
     // sectionName matches no listener -> Accepted=False / NoMatchingParent.
     let route: HttpRoute = from_json(json!({
