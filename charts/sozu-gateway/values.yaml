@@ -54,6 +54,13 @@ rbac:
   # external-dns &co). When on, the chart also points the controller at its own
   # Service via SOZU_GW_PUBLISH_SERVICE. Off by default for least-privilege.
   allowStatusWrites: false
+  # Grant gatewayclasses/gateways/httproutes status writes. Unlike the optional
+  # Ingress LB-address write above, status conditions are integral to the
+  # Gateway API — they ARE its UX (Accepted/Programmed/ResolvedRefs) — so this
+  # defaults to on. Turn it off for least-privilege deployments that accept
+  # degraded status; the chart then also tells the controller to skip the
+  # writes (they are best-effort either way).
+  allowGatewayStatusWrites: true
 
 # Sōzu data-plane sidecar. Unprivileged listener ports (no root / NET_BIND).
 sozu:

@@ -120,6 +120,17 @@ struct Args {
     /// Same as `--tcp-services-configmap`, for UDP.
     #[arg(long, env = "SOZU_GW_UDP_SERVICES")]
     udp_services_configmap: Option<String>,
+    /// Write Gateway API status (GatewayClass/Gateway/HTTPRoute conditions).
+    /// On by default — conditions are the API's UX — but can be disabled for
+    /// least-privilege deployments without the `*/status` RBAC grants (Helm
+    /// `rbac.allowGatewayStatusWrites=false`), where every write would 403.
+    #[arg(
+        long,
+        env = "SOZU_GW_GATEWAY_STATUS_WRITES",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    gateway_status_writes: bool,
 }
 
 /// Reflector read handles for every watched resource type.
@@ -129,8 +140,9 @@ struct Stores {
     services: Store<Service>,
     endpointslices: Store<EndpointSlice>,
     secrets: Store<Secret>,
-    /// ConfigMaps (only watched when L4 tcp/udp-services are configured).
-    config_maps: Store<ConfigMap>,
+    /// ConfigMap caches, one per watched namespace (only the namespaces named
+    /// by the L4 tcp/udp-services specs are watched; empty when L4 is off).
+    config_maps: Vec<Store<ConfigMap>>,
     // Gateway API (Phase 2).
     gateway_classes: Store<GatewayClass>,
     gateways: Store<Gateway>,
@@ -279,17 +291,32 @@ fn class_is_default(stores: &Stores, class_name: &str) -> bool {
     })
 }
 
-/// Find a `namespace/name` ConfigMap in the cache (L4 tcp/udp-services).
-fn lookup_configmap(store: &Store<ConfigMap>, spec: &Option<String>) -> Option<ConfigMap> {
+/// The distinct namespaces named by the L4 `namespace/name` ConfigMap specs.
+/// These are the only namespaces the controller watches ConfigMaps in — the
+/// RBAC grant is a namespaced Role, not a cluster-wide one, so `Api::all`
+/// would be both over-privileged and forbidden. A malformed spec (no `/`)
+/// yields no namespace; [`lookup_configmap`] could never resolve it anyway.
+fn l4_namespaces(specs: [&Option<String>; 2]) -> BTreeSet<String> {
+    specs
+        .into_iter()
+        .flatten()
+        .filter_map(|spec| spec.split_once('/'))
+        .map(|(ns, _)| ns.to_string())
+        .collect()
+}
+
+/// Find a `namespace/name` ConfigMap in the per-namespace caches (L4
+/// tcp/udp-services).
+fn lookup_configmap(stores: &[Store<ConfigMap>], spec: &Option<String>) -> Option<ConfigMap> {
     let (ns, name) = spec.as_ref()?.split_once('/')?;
-    store
-        .state()
+    stores
         .iter()
+        .flat_map(|store| store.state())
         .find(|cm| {
             cm.metadata.namespace.as_deref() == Some(ns)
                 && cm.metadata.name.as_deref() == Some(name)
         })
-        .map(|cm| (**cm).clone())
+        .map(|cm| (*cm).clone())
 }
 
 /// Latch readiness on the first successful reconcile (logging the transition).
@@ -522,15 +549,21 @@ async fn reconcile(
         .map(|s| status::gateway_addresses(s))
         .unwrap_or_default();
 
-    status::write_status(
-        client,
-        &args.controller_name,
-        &out.gateway_classes,
-        &out.gateways,
-        &out.routes,
-        &gw_addresses,
-    )
-    .await;
+    // Skippable for least-privilege deployments running without the
+    // gateways/status RBAC grants, where every write would 403.
+    if args.gateway_status_writes {
+        status::write_status(
+            client,
+            &args.controller_name,
+            &out.gateway_classes,
+            &out.gateways,
+            &out.routes,
+            &gw_addresses,
+        )
+        .await;
+    } else {
+        debug!("gateway status writes disabled");
+    }
 
     let lb_points = publish_svc
         .map(|s| status::lb_points(s))
@@ -654,21 +687,22 @@ async fn main() -> Result<()> {
         "secret",
     );
 
-    // ConfigMaps are only watched when L4 (tcp/udp-services) is configured, so a
-    // cluster not using L4 pays no ConfigMap-watch cost.
-    let l4_enabled = args.tcp_services_configmap.is_some() || args.udp_services_configmap.is_some();
-    let (config_maps, cm_w) = reflector::store();
-    if l4_enabled {
-        info!("L4 services configured; watching ConfigMaps");
+    // ConfigMaps are only watched when L4 (tcp/udp-services) is configured, and
+    // then only in the namespaces the specs name (one watcher per distinct
+    // namespace): the RBAC grant is namespaced, and a cluster not using L4 pays
+    // no ConfigMap-watch cost at all.
+    let mut config_maps = Vec::new();
+    for ns in l4_namespaces([&args.tcp_services_configmap, &args.udp_services_configmap]) {
+        info!(namespace = %ns, "L4 services configured; watching ConfigMaps");
+        let (store, w) = reflector::store();
         spawn_watch::<ConfigMap>(
-            Api::all(client.clone()),
+            Api::namespaced(client.clone(), &ns),
             watch_all(),
-            cm_w,
+            w,
             tx.clone(),
             "configmap",
         );
-    } else {
-        drop(cm_w);
+        config_maps.push(store);
     }
 
     // Gateway API CRDs are optional. Only watch them when they are installed, so
@@ -741,7 +775,8 @@ async fn main() -> Result<()> {
             stores.services.wait_until_ready(),
             stores.endpointslices.wait_until_ready(),
             stores.secrets.wait_until_ready(),
-            ready_when(l4_enabled, &stores.config_maps),
+            // Every per-namespace ConfigMap store in the vec has a watcher.
+            futures::future::try_join_all(stores.config_maps.iter().map(|s| s.wait_until_ready())),
             ready_when(gateway_api_enabled, &stores.gateway_classes),
             ready_when(gateway_api_enabled, &stores.gateways),
             ready_when(gateway_api_enabled, &stores.http_routes),
@@ -1086,6 +1121,73 @@ mod tests {
             missing_gateway_crds([false, false, false, false]),
             GATEWAY_API_KINDS.to_vec()
         );
+    }
+
+    fn cm(ns: &str, name: &str) -> ConfigMap {
+        ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                namespace: Some(ns.to_string()),
+                name: Some(name.to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn synced_store(objects: Vec<ConfigMap>) -> Store<ConfigMap> {
+        let (store, mut writer) = reflector::store();
+        writer.apply_watcher_event(&watcher::Event::Init);
+        for obj in objects {
+            writer.apply_watcher_event(&watcher::Event::InitApply(obj));
+        }
+        writer.apply_watcher_event(&watcher::Event::InitDone);
+        store
+    }
+
+    #[test]
+    fn l4_watch_covers_exactly_the_namespaces_the_specs_name() {
+        // The chart's common case: both maps in the release namespace — one
+        // watcher, not one per map.
+        assert_eq!(
+            l4_namespaces([&Some("gw/tcp".to_string()), &Some("gw/udp".to_string())]),
+            BTreeSet::from(["gw".to_string()])
+        );
+        // The two specs may name different namespaces: one watcher each.
+        assert_eq!(
+            l4_namespaces([&Some("a/tcp".to_string()), &Some("b/udp".to_string())]),
+            BTreeSet::from(["a".to_string(), "b".to_string()])
+        );
+        // Unset or malformed (no `/`) specs must not spawn a watcher: the
+        // lookup could never resolve them, and RBAC only covers named
+        // namespaces.
+        assert!(l4_namespaces([&None, &Some("no-slash".to_string())]).is_empty());
+    }
+
+    #[test]
+    fn lookup_configmap_searches_every_namespace_store() {
+        // Two L4 specs in different namespaces mean two per-namespace caches;
+        // the lookup must find a map wherever it lives, and still match on
+        // the full namespace/name (never on name alone).
+        let stores = vec![
+            synced_store(vec![cm("gw", "tcp-services")]),
+            synced_store(vec![cm("other", "udp-services")]),
+        ];
+        let spec = |s: &str| Some(s.to_string());
+        assert!(lookup_configmap(&stores, &spec("gw/tcp-services")).is_some());
+        assert!(lookup_configmap(&stores, &spec("other/udp-services")).is_some());
+        assert!(lookup_configmap(&stores, &spec("other/tcp-services")).is_none());
+        assert!(lookup_configmap(&stores, &None).is_none());
+    }
+
+    #[test]
+    fn gateway_status_writes_default_on_and_are_disablable() {
+        // Conditions are the Gateway API's UX: the default must stay on. The
+        // explicit off-switch exists for deployments without the */status
+        // RBAC grants.
+        let args = Args::parse_from(["sozu-gw-controller"]);
+        assert!(args.gateway_status_writes);
+        let args = Args::parse_from(["sozu-gw-controller", "--gateway-status-writes", "false"]);
+        assert!(!args.gateway_status_writes);
     }
 
     #[test]

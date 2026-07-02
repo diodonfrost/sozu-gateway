@@ -49,6 +49,10 @@ spec:
           imagePullPolicy: {{ .Values.image.sozu.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
+            # Sōzu only writes its socket/pid under /run/sozu — a mounted
+            # volume — so the root filesystem can be sealed like the
+            # controller's.
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           args: ["start", "-c", "/etc/sozu/config.toml"]
@@ -124,6 +128,13 @@ spec:
             # .status (needs the ingresses/status grant gated by the same flag).
             - name: SOZU_GW_PUBLISH_SERVICE
               value: "{{ .Release.Namespace }}/{{ include "sozu-gateway.fullname" . }}"
+            {{- end }}
+            {{- if not .Values.rbac.allowGatewayStatusWrites }}
+            # Without the */status grants every write would 403; tell the
+            # controller to skip them instead of logging a failure per object
+            # per reconcile.
+            - name: SOZU_GW_GATEWAY_STATUS_WRITES
+              value: "false"
             {{- end }}
             {{- if .Values.l4.tcpServices }}
             - name: SOZU_GW_TCP_SERVICES
