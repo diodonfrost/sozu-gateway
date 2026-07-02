@@ -196,6 +196,141 @@ fn no_ready_endpoints_keeps_cluster_reports_problem() {
 }
 
 #[test]
+fn fqdn_endpointslice_is_reported_and_ip_slices_keep_resolving() {
+    // An FQDN-type slice carries hostnames, not IPs: it must be reported as
+    // its own problem (not silently vanish into a misleading NoReadyEndpoints)
+    // while IPv4/IPv6 slices for the same Service keep resolving.
+    let fqdn_slice: EndpointSlice = from_json(json!({
+        "apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice",
+        "metadata": { "name": "web-fqdn", "namespace": "demo",
+            "labels": { "kubernetes.io/service-name": "web" } },
+        "addressType": "FQDN",
+        "ports": [{ "name": "http", "port": 8080 }],
+        "endpoints": [{ "addresses": ["pod.example.internal"], "conditions": { "ready": true } }]
+    }));
+    let inputs = Inputs {
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![fqdn_slice, web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert_eq!(out.ir.backends.len(), 2, "the IPv4 slice still resolves");
+    assert_eq!(
+        out.results[0].problems,
+        vec![Problem::FqdnEndpointsUnsupported {
+            service: "web".to_string()
+        }]
+    );
+}
+
+#[test]
+fn fqdn_only_service_reports_fqdn_problem_not_just_no_endpoints() {
+    let fqdn_slice: EndpointSlice = from_json(json!({
+        "apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice",
+        "metadata": { "name": "web-fqdn", "namespace": "demo",
+            "labels": { "kubernetes.io/service-name": "web" } },
+        "addressType": "FQDN",
+        "ports": [{ "name": "http", "port": 8080 }],
+        "endpoints": [{ "addresses": ["pod.example.internal"], "conditions": { "ready": true } }]
+    }));
+    let inputs = Inputs {
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![fqdn_slice]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert!(out.ir.backends.is_empty());
+    assert!(
+        out.results[0]
+            .problems
+            .contains(&Problem::FqdnEndpointsUnsupported {
+                service: "web".to_string()
+            }),
+        "the FQDN slice must be named as the cause, got {:?}",
+        out.results[0].problems
+    );
+}
+
+#[test]
+fn out_of_range_endpoint_port_is_skipped_not_truncated() {
+    // The EndpointPort wire type is i32; a value outside u16 cannot be a real
+    // port, but an `as u16` cast would silently rewrite 65616 into 80 and
+    // route traffic to a port nobody declared. The entry must be skipped.
+    let slice: EndpointSlice = from_json(json!({
+        "apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice",
+        "metadata": { "name": "web-bad", "namespace": "demo",
+            "labels": { "kubernetes.io/service-name": "web" } },
+        "addressType": "IPv4",
+        "ports": [{ "name": "http", "port": 65616 }],
+        "endpoints": [{ "addresses": ["10.244.0.5"], "conditions": { "ready": true } }]
+    }));
+    let inputs = Inputs {
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![slice]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert!(
+        out.ir.backends.is_empty(),
+        "an out-of-range port must not truncate into a bogus backend: {:?}",
+        out.ir.backends
+    );
+}
+
+#[test]
+fn tls_entry_without_hosts_reports_problem_and_skips_cert() {
+    // secretName without hosts: SNI names come from tls.hosts, so there is
+    // nothing to bind the cert to and no rule host turns HTTPS. Loading the
+    // cert anyway would be half-applied material — it must be skipped and the
+    // gap reported.
+    let ing: Ingress = from_json(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": { "name": "web", "namespace": "demo" },
+        "spec": {
+            "ingressClassName": "sozu",
+            "tls": [{ "secretName": "app-tls" }],
+            "rules": [{
+                "host": "app.example.com",
+                "http": { "paths": [
+                    { "path": "/", "pathType": "Prefix",
+                      "backend": { "service": { "name": "web", "port": { "number": 80 } } } }
+                ]}
+            }]
+        }
+    }));
+    let inputs = Inputs {
+        ingresses: arcs(vec![ing]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert!(
+        out.ir.certificates.is_empty(),
+        "a hostless TLS entry must not load a cert with empty SNI names"
+    );
+    assert_eq!(
+        out.ir.frontends.len(),
+        1,
+        "only the plain-HTTP frontend remains"
+    );
+    assert!(!out.ir.frontends[0].tls);
+    assert_eq!(
+        out.results[0].problems,
+        vec![Problem::TlsEntryWithoutHosts {
+            secret: "app-tls".to_string()
+        }]
+    );
+}
+
+#[test]
 fn path_types_map_correctly() {
     let ing: Ingress = from_json(json!({
         "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",

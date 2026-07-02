@@ -21,12 +21,12 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Ingress | Rule without a host (catch-all) | ❌ | skipped with a reported problem |
 | Ingress | `spec.defaultBackend` | ❌ | not routed; reported as a `DefaultBackendUnsupported` problem |
 | Ingress | `backend.resource` (non-Service backend) | ❌ | only Service backends |
-| TLS | Termination from a `Secret` (`tls.crt`/`tls.key`) | ✅ | `type: kubernetes.io/tls` Secrets only (the controller watches nothing else); works with cert-manager-issued Secrets |
+| TLS | Termination from a `Secret` (`tls.crt`/`tls.key`) | ✅ | `type: kubernetes.io/tls` Secrets only (the controller watches nothing else); works with cert-manager-issued Secrets. Each TLS entry must list `hosts` — a hostless entry is reported (`TlsEntryWithoutHosts`) and skipped |
 | TLS | SNI host selection | ✅ | handled by Sōzu |
 | TLS | Wildcard certificate | ✅ | |
 | TLS | Zero-gap certificate rotation | ✅ | `ReplaceCertificate` |
 | TLS | HTTP → HTTPS redirect | ✅ | automatic for TLS-enabled Ingress hosts (301); opt out with `sozu.io/ssl-redirect: "false"` |
-| Routing | Backends = pod IPs from EndpointSlice | ✅ | never the Service ClusterIP |
+| Routing | Backends = pod IPs from EndpointSlice | ✅ | never the Service ClusterIP; `addressType: IPv4`/`IPv6` only — an FQDN slice is reported (`FqdnEndpointsUnsupported`) and ignored |
 | Routing | Multi-port Service (match by port name) | ✅ | |
 | Routing | Ready-endpoint filtering | ✅ | excludes not-ready endpoints |
 | Routing | Hot reload — no proxy restart | ✅ | see [E2E-RESULTS.md](E2E-RESULTS.md) |
