@@ -726,6 +726,7 @@ fn attach_rule(
             &backend_ns,
             &br.name,
             &PortRef::Number(port),
+            problems,
         ) {
             Err(problem) => {
                 problems.push(problem);

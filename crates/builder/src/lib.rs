@@ -104,6 +104,13 @@ pub enum Problem {
         secret: String,
     },
     TlsEntryWithoutSecret,
+    /// An Ingress TLS entry names a Secret but no hosts. SNI names come from
+    /// `tls.hosts`, so there is nothing to bind the certificate to and no
+    /// rule host would turn HTTPS: loading the cert would be half-applied
+    /// material serving nobody. Reported, and the entry is skipped entirely.
+    TlsEntryWithoutHosts {
+        secret: String,
+    },
     InvalidCertificate {
         secret: String,
         reason: String,
@@ -121,6 +128,14 @@ pub enum Problem {
         port: String,
     },
     NoReadyEndpoints {
+        service: String,
+    },
+    /// An EndpointSlice with `addressType: FQDN` backs this Service. Backends
+    /// are pod `IP:port` (Sōzu dials addresses, not hostnames), so the slice
+    /// is skipped and reported — silently dropping its addresses would
+    /// surface only as a misleading `NoReadyEndpoints`. IPv4/IPv6 slices for
+    /// the same Service keep resolving.
+    FqdnEndpointsUnsupported {
         service: String,
     },
     /// Another object already claims this exact route key (listener + host +
@@ -196,12 +211,14 @@ impl Problem {
         match self {
             Problem::SecretNotFound { .. } => "SecretNotFound",
             Problem::TlsEntryWithoutSecret => "TlsEntryWithoutSecret",
+            Problem::TlsEntryWithoutHosts { .. } => "TlsEntryWithoutHosts",
             Problem::InvalidCertificate { .. } => "InvalidCertificate",
             Problem::NonServiceBackend => "NonServiceBackend",
             Problem::DefaultBackendUnsupported => "DefaultBackendUnsupported",
             Problem::ServiceNotFound { .. } => "ServiceNotFound",
             Problem::ServicePortNotFound { .. } => "ServicePortNotFound",
             Problem::NoReadyEndpoints { .. } => "NoReadyEndpoints",
+            Problem::FqdnEndpointsUnsupported { .. } => "FqdnEndpointsUnsupported",
             Problem::RouteCollision { .. } => "RouteCollision",
             Problem::UnsupportedTlsMode { .. } => "UnsupportedTlsMode",
             Problem::UnsupportedProtocol { .. } => "UnsupportedProtocol",
@@ -239,6 +256,9 @@ impl std::fmt::Display for Problem {
             Problem::TlsEntryWithoutSecret => {
                 write!(f, "Ingress TLS entry has no secretName; its hosts stay plain HTTP")
             }
+            Problem::TlsEntryWithoutHosts { secret } => {
+                write!(f, "Ingress TLS entry for Secret {secret:?} lists no hosts; the certificate was skipped and the rule hosts stay plain HTTP")
+            }
             Problem::InvalidCertificate { secret, reason } => {
                 write!(f, "TLS Secret {secret:?} holds unusable material: {reason}")
             }
@@ -255,6 +275,10 @@ impl std::fmt::Display for Problem {
             Problem::NoReadyEndpoints { service } => {
                 write!(f, "Service {service:?} has no ready endpoints")
             }
+            Problem::FqdnEndpointsUnsupported { service } => write!(
+                f,
+                "Service {service:?} has an EndpointSlice of addressType \"FQDN\", which is not supported (backends must be pod IPs); the slice was ignored"
+            ),
             Problem::RouteCollision {
                 hostname,
                 path,
@@ -543,11 +567,14 @@ impl<'a> Index<'a> {
 }
 
 /// Resolve an Ingress backend (service + port) to (cluster_id, pod addresses).
+/// Non-fatal findings (an ignored FQDN slice) are appended to `problems`;
+/// the `Err` variant is reserved for failures that leave nothing to program.
 fn resolve_backends(
     index: &Index,
     namespace: &str,
     service: &str,
     port_ref: &PortRef,
+    problems: &mut Vec<Problem>,
 ) -> Result<(String, i32, Vec<SocketAddr>), Problem> {
     let svc = index
         .services
@@ -581,6 +608,19 @@ fn resolve_backends(
         .get(&(namespace.to_string(), service.to_string()))
     {
         for slice in slices {
+            // An FQDN-type slice carries hostnames, not IPs: every address
+            // would fail the IpAddr parse below and vanish, surfacing only as
+            // a misleading NoReadyEndpoints. Report it and skip the slice;
+            // IPv4/IPv6 slices for the same Service keep resolving.
+            if slice.address_type == "FQDN" {
+                let problem = Problem::FqdnEndpointsUnsupported {
+                    service: service.to_string(),
+                };
+                if !problems.contains(&problem) {
+                    problems.push(problem);
+                }
+                continue;
+            }
             let pod_port = slice
                 .ports
                 .as_ref()
@@ -598,7 +638,12 @@ fn resolve_backends(
                     })
                 })
                 .and_then(|p| p.port);
-            let Some(pod_port) = pod_port else { continue };
+            // The wire type is i32; a value outside u16 cannot be a real port
+            // (API validation forbids it), but truncating with `as` would
+            // silently rewrite it into a different port — skip it instead.
+            let Some(pod_port) = pod_port.and_then(|p| u16::try_from(p).ok()) else {
+                continue;
+            };
 
             for endpoint in slice.endpoints.iter().flatten() {
                 // Treat ready=None (unknown) as ready; exclude only ready=Some(false).
@@ -612,7 +657,7 @@ fn resolve_backends(
                 }
                 for addr in &endpoint.addresses {
                     if let Ok(ip) = addr.parse::<IpAddr>() {
-                        addrs.push(SocketAddr::new(ip, pod_port as u16));
+                        addrs.push(SocketAddr::new(ip, pod_port));
                     }
                 }
             }
@@ -670,7 +715,11 @@ fn cluster_settings(service: Option<&Service>) -> ClusterSettings {
 
 /// Resolve a Service+port and upsert its cluster + pod-IP backends into the
 /// shared accumulators. Shared by the Ingress and Gateway API mappers so both
-/// feed the *same* IR. Returns `(cluster_id, has_ready_endpoints)`.
+/// feed the *same* IR. Returns `(cluster_id, has_ready_endpoints)`; non-fatal
+/// findings (an ignored FQDN slice) are appended to `problems`.
+// The two accumulator sets (`referenced`, `problems`) pushed it past the
+// lint's limit; bundling them would just move the noise to every call site.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_service_route(
     index: &Index,
     clusters: &mut BTreeMap<String, ir::Cluster>,
@@ -679,11 +728,13 @@ pub(crate) fn add_service_route(
     namespace: &str,
     service: &str,
     port_ref: &PortRef,
+    problems: &mut Vec<Problem>,
 ) -> Result<(String, bool), Problem> {
     // Recorded before resolution, success or failure alike: an EndpointSlice
     // appearing later for a still-broken target must read as relevant.
     referenced.insert(format!("{namespace}/{service}"));
-    let (cluster_id, _port, addrs) = resolve_backends(index, namespace, service, port_ref)?;
+    let (cluster_id, _port, addrs) =
+        resolve_backends(index, namespace, service, port_ref, problems)?;
     let svc = index
         .services
         .get(&(namespace.to_string(), service.to_string()))
@@ -910,7 +961,14 @@ fn build_l4(
                 }
                 Some((port, ns, svc, port_ref)) => {
                     match add_service_route(
-                        index, clusters, backends, referenced, &ns, &svc, &port_ref,
+                        index,
+                        clusters,
+                        backends,
+                        referenced,
+                        &ns,
+                        &svc,
+                        &port_ref,
+                        &mut problems,
                     ) {
                         Ok((cluster_id, has_endpoints)) => {
                             if !has_endpoints {
@@ -994,6 +1052,16 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                 problems.push(Problem::TlsEntryWithoutSecret);
                 continue;
             };
+            // No hosts means nothing to derive SNI names from and no rule
+            // host would turn HTTPS: the cert would load with an empty name
+            // set while the Ingress keeps serving plain HTTP — half-applied
+            // material. Report and skip the entry entirely.
+            if hosts.is_empty() {
+                problems.push(Problem::TlsEntryWithoutHosts {
+                    secret: secret_name.clone(),
+                });
+                continue;
+            }
             match index.secrets.get(&(namespace.clone(), secret_name.clone())) {
                 None => problems.push(Problem::SecretNotFound {
                     secret: secret_name.clone(),
@@ -1056,6 +1124,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                     &namespace,
                     &svc_backend.name,
                     &port_ref,
+                    &mut problems,
                 ) {
                     Err(problem) => problems.push(problem),
                     Ok((cluster_id, has_endpoints)) => {
