@@ -351,6 +351,7 @@ async fn probe_sozu_generation(
     acked_reconnects: &mut u64,
     baseline: &mut Option<BTreeSet<i32>>,
     shadow: &mut Ir,
+    self_metrics: &metrics::SelfMetrics,
 ) -> shadow::GenerationCheck {
     // Read the epoch *before* the probe: a reconnect landing mid-probe stays
     // pending and triggers one more (cheap, idempotent) check.
@@ -358,6 +359,9 @@ async fn probe_sozu_generation(
     let outcome = shadow::check_restart_generation(agent, baseline, shadow).await;
     if outcome != shadow::GenerationCheck::ProbeFailed {
         *acked_reconnects = pending;
+    }
+    if outcome == shadow::GenerationCheck::Reset {
+        self_metrics.record_shadow_reset();
     }
     outcome
 }
@@ -520,8 +524,11 @@ async fn main() -> Result<()> {
     // Optional Prometheus `/metrics`: each scrape pulls Sōzu's aggregated
     // metrics over the same command socket and renders them. Best-effort and
     // independent of routing — a bind failure never affects reconciliation.
+    // Self-metrics are recorded unconditionally (cheap atomics); the endpoint
+    // below only decides whether anyone can scrape them.
+    let self_metrics = Arc::new(metrics::SelfMetrics::default());
     if let Some(addr) = args.metrics_listen {
-        metrics::spawn(addr, agent.clone());
+        metrics::spawn(addr, agent.clone(), self_metrics.clone());
     }
 
     // One signal channel fed by every watcher.
@@ -713,9 +720,16 @@ async fn main() -> Result<()> {
     let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
 
     // Initial reconcile (full apply). Readiness latches once this succeeds.
+    let started = std::time::Instant::now();
     match reconcile(&args, &client, &stores, &agent, &mut shadow).await {
-        Ok(()) => mark_ready(&ready),
-        Err(e) => error!(error = ?e, "initial reconcile failed; will retry"),
+        Ok(()) => {
+            self_metrics.record_reconcile(started.elapsed(), true);
+            mark_ready(&ready);
+        }
+        Err(e) => {
+            self_metrics.record_reconcile(started.elapsed(), false);
+            error!(error = ?e, "initial reconcile failed; will retry");
+        }
     }
     // A reconnect can land *during* that first apply (Sōzu restarting
     // mid-batch): probe right away and nudge the loop when a full re-apply or
@@ -726,6 +740,7 @@ async fn main() -> Result<()> {
             &mut acked_reconnects,
             &mut worker_baseline,
             &mut shadow,
+            &self_metrics,
         )
         .await
             != shadow::GenerationCheck::Unchanged
@@ -768,6 +783,7 @@ async fn main() -> Result<()> {
                 &mut acked_reconnects,
                 &mut worker_baseline,
                 &mut shadow,
+                &self_metrics,
             )
             .await
                 == shadow::GenerationCheck::ProbeFailed
@@ -775,9 +791,16 @@ async fn main() -> Result<()> {
             let _ = tx.try_send(());
         }
 
+        let started = std::time::Instant::now();
         match reconcile(&args, &client, &stores, &agent, &mut shadow).await {
-            Ok(()) => mark_ready(&ready),
-            Err(e) => error!(error = ?e, "reconcile failed; will retry on next event/resync"),
+            Ok(()) => {
+                self_metrics.record_reconcile(started.elapsed(), true);
+                mark_ready(&ready);
+            }
+            Err(e) => {
+                self_metrics.record_reconcile(started.elapsed(), false);
+                error!(error = ?e, "reconcile failed; will retry on next event/resync");
+            }
         }
 
         // The emptiness race, closed: a reconnect landing *mid-apply* means
@@ -792,6 +815,7 @@ async fn main() -> Result<()> {
                 &mut acked_reconnects,
                 &mut worker_baseline,
                 &mut shadow,
+                &self_metrics,
             )
             .await
                 != shadow::GenerationCheck::Unchanged
