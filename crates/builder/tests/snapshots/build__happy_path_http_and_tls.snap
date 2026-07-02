@@ -80,7 +80,6 @@ expression: out
     {
       "namespace": "demo",
       "name": "web",
-      "accepted": true,
       "problems": []
     }
   ],

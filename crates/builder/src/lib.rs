@@ -196,7 +196,6 @@ pub struct L4Result {
 pub struct IngressResult {
     pub namespace: String,
     pub name: String,
-    pub accepted: bool,
     pub problems: Vec<Problem>,
 }
 
@@ -798,7 +797,6 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
             results.push(IngressResult {
                 namespace,
                 name,
-                accepted: true,
                 problems,
             });
             continue;
@@ -956,7 +954,6 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         results.push(IngressResult {
             namespace,
             name,
-            accepted: true,
             problems,
         });
     }
