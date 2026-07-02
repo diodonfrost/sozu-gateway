@@ -36,9 +36,10 @@ controller:
                           # detection then only runs on a command-socket reconnect)
   healthPort: 8081        # /healthz (liveness) + /readyz (readiness gated on first reconcile)
 
-# Prometheus /metrics on the controller. Each scrape pulls Sōzu's data-plane
-# metrics over the command socket and renders them in Prometheus text format
-# (Sōzu has no native /metrics endpoint). Off by default.
+# Prometheus /metrics on the controller. Each scrape serves the controller's
+# own health signals (sozu_gw_controller_*: last successful reconcile,
+# failures, shadow resets) and pulls Sōzu's data-plane metrics over the
+# command socket (Sōzu has no native /metrics endpoint). Off by default.
 metrics:
   enabled: false
   port: 9100              # container port + ClusterIP Service port for /metrics
