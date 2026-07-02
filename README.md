@@ -79,6 +79,7 @@ The controller is configured entirely through the Helm chart
 | `service.type` | `LoadBalancer` | How the proxy is exposed |
 | `sozu.httpPort` / `httpsPort` | `8080` / `8443` | In-pod listener ports (the Service maps 80 / 443 to these) |
 | `rbac.allowStatusWrites` | `false` | Publish the gateway's LoadBalancer address into Ingress / Gateway `.status` |
+| `rbac.allowGatewayStatusWrites` | `true` | Write Gateway API status conditions (they are the API's UX; off = least-privilege, degraded status) |
 | `metrics.enabled` | `false` | Serve Prometheus `/metrics` (pulled from Sōzu over the socket) |
 | `l4.tcpServices` / `udpServices` | `{}` | Map `"<port>": "<ns>/<svc>:<port>"` for raw TCP / UDP forwarding |
 

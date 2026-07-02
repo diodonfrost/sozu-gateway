@@ -15,12 +15,6 @@ rules:
   - apiGroups: [""]
     resources: ["services", "secrets"]
     verbs: ["get", "list", "watch"]
-{{- if or .Values.l4.tcpServices .Values.l4.udpServices }}
-  # L4 (TCP/UDP) port→service maps live in ConfigMaps.
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "list", "watch"]
-{{- end }}
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["get", "list", "watch"]
@@ -33,9 +27,13 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gatewayclasses", "gateways", "httproutes", "referencegrants"]
     verbs: ["get", "list", "watch"]
+{{- if .Values.rbac.allowGatewayStatusWrites }}
+  # Gateway API status conditions — on by default, they are the API's UX
+  # (see rbac.allowGatewayStatusWrites in values.yaml).
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gatewayclasses/status", "gateways/status", "httproutes/status"]
     verbs: ["update", "patch"]
+{{- end }}
   # Problem reporting as Events on the owning Ingress/Gateway/HTTPRoute
   # (kubectl describe). patch updates the series count of a repeated event.
   - apiGroups: ["events.k8s.io"]
@@ -62,3 +60,36 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "sozu-gateway.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if or .Values.l4.tcpServices .Values.l4.udpServices }}
+---
+# L4 (TCP/UDP) port→service maps. The chart renders them into the release
+# namespace and points the controller at exactly those two names, so read
+# access is a namespaced Role there — not a cluster-wide configmaps grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "sozu-gateway.fullname" . }}-l4-services
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "sozu-gateway.fullname" . }}-l4-services
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "sozu-gateway.fullname" . }}-l4-services
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sozu-gateway.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
