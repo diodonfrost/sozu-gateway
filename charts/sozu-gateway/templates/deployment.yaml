@@ -146,8 +146,12 @@ spec:
           resources:
             {{- toYaml .Values.resources.controller | nindent 12 }}
       volumes:
+        # tmpfs, not node disk: this volume carries the command socket, the
+        # persisted shadow and Sōzu state dumps — material that must die with
+        # the pod instead of lingering on the node's filesystem.
         - name: sozu-run
-          emptyDir: {}
+          emptyDir:
+            medium: Memory
         - name: sozu-config
           configMap:
             name: {{ include "sozu-gateway.fullname" . }}-sozu
