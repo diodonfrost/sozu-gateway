@@ -23,6 +23,17 @@
 //! `process="main"` (so they never collide with an identically-named proxy
 //! series); cluster metrics carry `cluster_id`; backend metrics carry
 //! `cluster_id` + `backend_id`.
+//!
+//! Two intentional drops, so the exposition stays spec-valid:
+//! - `AggregatedMetrics.workers` is **not rendered**. The controller queries
+//!   with workers pre-merged (Sōzu folds them into the proxy/cluster maps), so
+//!   the field is empty on the production path; a caller passing worker-scoped
+//!   data must know it is dropped, never silently mixed into the merged series.
+//! - A series whose kind conflicts with its family's already-established type
+//!   (same sanitized name, different metric kind) is **skipped**: rendering,
+//!   say, summary-shaped `quantile`/`_sum`/`_count` lines under a `# TYPE ...
+//!   counter` is invalid exposition that Prometheus may reject wholesale. The
+//!   drop is surfaced as a `sozu_gw_dropped_series` gauge on the scrape itself.
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
@@ -41,9 +52,41 @@ struct Family {
     series: Vec<(String, String)>,
 }
 
+/// The families under construction, plus the count of series skipped because
+/// their kind conflicted with their family's established type.
+#[derive(Default)]
+struct Families {
+    map: BTreeMap<String, Family>,
+    dropped: usize,
+}
+
+impl Families {
+    /// Attach a rendered series to its family. The first kind seen under a
+    /// name fixes the family's `# TYPE`; a later series of a *different* kind
+    /// is differently shaped (`quantile`/`_bucket`/`_sum` lines) and rendering
+    /// it under that TYPE would be spec-invalid exposition — it is skipped and
+    /// counted instead.
+    fn insert(&mut self, base: String, mtype: &'static str, sort_key: String, lines: String) {
+        let family = self.map.entry(base).or_insert_with(|| Family {
+            mtype,
+            series: Vec::new(),
+        });
+        if family.mtype != mtype {
+            self.dropped += 1;
+            return;
+        }
+        family.series.push((sort_key, lines));
+    }
+}
+
 /// Render `metrics` as a Prometheus text-format exposition document.
+///
+/// `metrics.workers` is intentionally ignored, and a series whose kind
+/// conflicts with its family's established type is skipped (see the module
+/// docs); skipped series are reported in-band as a `sozu_gw_dropped_series`
+/// gauge, rendered only when non-zero.
 pub fn render(metrics: &AggregatedMetrics) -> String {
-    let mut families: BTreeMap<String, Family> = BTreeMap::new();
+    let mut families = Families::default();
 
     // Proxy metrics, already merged across workers — no labels.
     for (name, fm) in &metrics.proxying {
@@ -70,7 +113,7 @@ pub fn render(metrics: &AggregatedMetrics) -> String {
     }
 
     let mut out = String::new();
-    for (base, mut family) in families {
+    for (base, mut family) in families.map {
         let _ = writeln!(out, "# HELP {base} Sozu data-plane metric.");
         let _ = writeln!(out, "# TYPE {base} {}", family.mtype);
         family.series.sort_by(|a, b| a.0.cmp(&b.0));
@@ -78,11 +121,21 @@ pub fn render(metrics: &AggregatedMetrics) -> String {
             out.push_str(&lines);
         }
     }
+    // The crate is pure (no logging), so the drop is reported in-band, on the
+    // scrape it happened in — visible to whoever reads the exposition.
+    if families.dropped > 0 {
+        let _ = writeln!(
+            out,
+            "# HELP sozu_gw_dropped_series Series dropped from this exposition because their metric kind conflicted with their family's established type."
+        );
+        let _ = writeln!(out, "# TYPE sozu_gw_dropped_series gauge");
+        let _ = writeln!(out, "sozu_gw_dropped_series {}", families.dropped);
+    }
     out
 }
 
 fn add_metric(
-    families: &mut BTreeMap<String, Family>,
+    families: &mut Families,
     raw_name: &str,
     labels: &[(&str, &str)],
     fm: &FilteredMetrics,
@@ -113,7 +166,7 @@ fn sanitize(raw: &str) -> String {
 }
 
 fn push_scalar(
-    families: &mut BTreeMap<String, Family>,
+    families: &mut Families,
     base: String,
     mtype: &'static str,
     labels: &[(&str, &str)],
@@ -121,11 +174,11 @@ fn push_scalar(
 ) {
     let lset = fmt_labels(labels, &[]);
     let line = format!("{base}{lset} {value}\n");
-    insert(families, base, mtype, lset, line);
+    families.insert(base, mtype, lset, line);
 }
 
 fn push_histogram(
-    families: &mut BTreeMap<String, Family>,
+    families: &mut Families,
     base: String,
     labels: &[(&str, &str)],
     h: &FilteredHistogram,
@@ -144,15 +197,10 @@ fn push_histogram(
     let lset = fmt_labels(labels, &[]);
     let _ = writeln!(lines, "{base}_sum{lset} {}", h.sum);
     let _ = writeln!(lines, "{base}_count{lset} {}", h.count);
-    insert(families, base, "histogram", lset, lines);
+    families.insert(base, "histogram", lset, lines);
 }
 
-fn push_summary(
-    families: &mut BTreeMap<String, Family>,
-    base: String,
-    labels: &[(&str, &str)],
-    p: &Percentiles,
-) {
+fn push_summary(families: &mut Families, base: String, labels: &[(&str, &str)], p: &Percentiles) {
     let mut lines = String::new();
     for (quantile, value) in [
         ("0.5", p.p_50),
@@ -169,24 +217,7 @@ fn push_summary(
     let lset = fmt_labels(labels, &[]);
     let _ = writeln!(lines, "{base}_sum{lset} {}", p.sum);
     let _ = writeln!(lines, "{base}_count{lset} {}", p.samples);
-    insert(families, base, "summary", lset, lines);
-}
-
-fn insert(
-    families: &mut BTreeMap<String, Family>,
-    base: String,
-    mtype: &'static str,
-    sort_key: String,
-    lines: String,
-) {
-    families
-        .entry(base)
-        .or_insert_with(|| Family {
-            mtype,
-            series: Vec::new(),
-        })
-        .series
-        .push((sort_key, lines));
+    families.insert(base, "summary", lset, lines);
 }
 
 /// Format a label set as `{k1="v1",k2="v2"}` (empty string when no labels).

@@ -132,4 +132,68 @@ fn well_formed() {
     deduped.sort_unstable();
     deduped.dedup();
     assert_eq!(type_lines.len(), deduped.len(), "duplicate # TYPE lines");
+
+    // A conflict-free exposition carries no drop marker.
+    assert!(!out.contains("sozu_gw_dropped_series"));
+}
+
+#[test]
+fn mismatched_kind_series_is_skipped_not_misrendered() {
+    // The same name arrives as a counter (proxy scope) and as percentiles
+    // (cluster scope). The first kind wins the family's # TYPE; the summary-
+    // shaped series (quantile/_sum/_count lines) must be skipped — rendered
+    // under `# TYPE ... counter` it would be spec-invalid exposition that
+    // Prometheus may reject wholesale — and the drop must be visible in-band.
+    let metrics = AggregatedMetrics {
+        proxying: BTreeMap::from([("requests".to_string(), count(1000))]),
+        clusters: BTreeMap::from([(
+            "demo/app".to_string(),
+            ClusterMetrics {
+                cluster: BTreeMap::from([("requests".to_string(), percentiles())]),
+                backends: vec![],
+            },
+        )]),
+        ..Default::default()
+    };
+    let out = sozu_gw_prometheus::render(&metrics);
+
+    // The established family renders as usual.
+    assert!(out.contains("# TYPE sozu_requests counter"));
+    assert!(out.contains("sozu_requests 1000\n"));
+    // Nothing summary-shaped leaks under the counter family.
+    assert!(
+        !out.contains("quantile"),
+        "summary series must not render under a counter family:\n{out}"
+    );
+    assert!(!out.contains("sozu_requests_sum"));
+    assert!(!out.contains("sozu_requests_count"));
+    // The drop is reported on the scrape itself.
+    assert!(out.contains("# TYPE sozu_gw_dropped_series gauge"));
+    assert!(out.contains("sozu_gw_dropped_series 1\n"), "{out}");
+}
+
+#[test]
+fn worker_scoped_metrics_are_intentionally_dropped() {
+    // The controller queries with workers pre-merged, so `workers` is empty on
+    // the production path; a caller that does pass worker-scoped data must see
+    // it dropped, never silently mixed into the merged, unlabelled series.
+    let worker = sozu_command_lib::proto::command::WorkerMetrics {
+        proxy: BTreeMap::from([("worker_only_metric".to_string(), gauge(9))]),
+        clusters: BTreeMap::from([(
+            "demo/app".to_string(),
+            ClusterMetrics {
+                cluster: BTreeMap::from([("worker_cluster_metric".to_string(), count(4))]),
+                backends: vec![],
+            },
+        )]),
+    };
+    let metrics = AggregatedMetrics {
+        workers: BTreeMap::from([("0".to_string(), worker)]),
+        ..Default::default()
+    };
+    let out = sozu_gw_prometheus::render(&metrics);
+    assert!(
+        !out.contains("worker_only_metric") && !out.contains("worker_cluster_metric"),
+        "worker-scoped metrics must not render:\n{out}"
+    );
 }
