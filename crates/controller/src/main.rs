@@ -840,7 +840,11 @@ async fn main() -> Result<()> {
         let mut check_sozu = false;
         tokio::select! {
             maybe = rx.recv() => {
-                if maybe.is_none() { warn!("all watchers gone; exiting"); break; }
+                // Defensive only: this loop holds its own tx clone (for
+                // self-nudges), so the channel cannot actually close while
+                // we are here. If that invariant is ever broken, exit loudly
+                // rather than spin on a dead channel.
+                if maybe.is_none() { warn!("change channel closed (should be unreachable); exiting"); break; }
                 // Debounce: let a burst settle, then drain the queue.
                 tokio::time::sleep(debounce).await;
                 while rx.try_recv().is_ok() {}
