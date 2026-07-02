@@ -18,6 +18,11 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "sozu-gateway.serviceAccountName" . }}
+      # The ServiceAccount can read Secrets cluster-wide; the data-plane
+      # container parses untrusted network input and must never hold that
+      # credential. The token (plus CA and namespace, which in-cluster API
+      # clients need) is projected into the controller container only.
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -135,6 +140,9 @@ spec:
           volumeMounts:
             - name: sozu-run
               mountPath: /run/sozu
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
           resources:
             {{- toYaml .Values.resources.controller | nindent 12 }}
       volumes:
@@ -143,6 +151,25 @@ spec:
         - name: sozu-config
           configMap:
             name: {{ include "sozu-gateway.fullname" . }}-sozu
+        # Hand-rolled equivalent of the automounted token volume, so the
+        # controller keeps API access while the sozu container gets none.
+        - name: kube-api-access
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
