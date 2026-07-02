@@ -86,9 +86,20 @@ l4:
 # emptyDir volume.
 runAsUser: 1000
 
+# Modest default *requests* only: without them the Pod lands in the
+# BestEffort QoS class and the gateway is the first thing evicted under node
+# pressure. Limits are deliberately left unset — requests alone fix the
+# QoS/eviction class, while a CPU limit would throttle the data path under
+# load. Override freely (and add limits if your platform mandates them).
 resources:
-  controller: {}
-  sozu: {}
+  controller:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  sozu:
+    requests:
+      cpu: 250m
+      memory: 256Mi
 
 nodeSelector: {}
 tolerations: []

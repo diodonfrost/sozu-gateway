@@ -6,6 +6,14 @@ metadata:
     {{- include "sozu-gateway.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  # An edge proxy must never dip below capacity during an upgrade: bring one
+  # new Pod up (and let readiness gate it on programmed routes) before any
+  # old one is taken down.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       {{- include "sozu-gateway.selectorLabels" . | nindent 6 }}
