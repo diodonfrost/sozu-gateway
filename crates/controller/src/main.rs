@@ -41,6 +41,7 @@ use sozu_gw_builder::{build, BuildConfig, Inputs};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant};
 use sozu_gw_translator as tr;
 
+mod events;
 mod health;
 mod metrics;
 mod shadow;
@@ -375,6 +376,7 @@ async fn reconcile(
     stores: &Stores,
     agent: &SozuAgentHandle,
     shadow: &mut Ir,
+    problem_events: &mut events::ProblemEvents,
 ) -> Result<()> {
     let cfg = BuildConfig {
         class_name: args.class_name.clone(),
@@ -421,6 +423,12 @@ async fn reconcile(
             warn!(protocol = %r.protocol, port = r.listen_port, target = %r.target, problems = ?r.problems, "l4 service has problems");
         }
     }
+
+    // Surface the problems on their owning objects (kubectl describe), before
+    // and independent of the apply: a broken Secret must be visible to its
+    // owner even when the socket push fails. Best-effort, diffed against the
+    // previous pass so resyncs do not flood etcd with duplicate events.
+    problem_events.publish_new(&out).await;
 
     let requests = tr::reconcile(shadow, &out.ir).context("translate IR to commands")?;
     let mut applied = false;
@@ -719,9 +727,21 @@ async fn main() -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
     let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
 
+    // Event publisher for reported problems, with its diff baseline.
+    let mut problem_events = events::ProblemEvents::new(client.clone());
+
     // Initial reconcile (full apply). Readiness latches once this succeeds.
     let started = std::time::Instant::now();
-    match reconcile(&args, &client, &stores, &agent, &mut shadow).await {
+    match reconcile(
+        &args,
+        &client,
+        &stores,
+        &agent,
+        &mut shadow,
+        &mut problem_events,
+    )
+    .await
+    {
         Ok(()) => {
             self_metrics.record_reconcile(started.elapsed(), true);
             mark_ready(&ready);
@@ -792,7 +812,16 @@ async fn main() -> Result<()> {
         }
 
         let started = std::time::Instant::now();
-        match reconcile(&args, &client, &stores, &agent, &mut shadow).await {
+        match reconcile(
+            &args,
+            &client,
+            &stores,
+            &agent,
+            &mut shadow,
+            &mut problem_events,
+        )
+        .await
+        {
             Ok(()) => {
                 self_metrics.record_reconcile(started.elapsed(), true);
                 mark_ready(&ready);
