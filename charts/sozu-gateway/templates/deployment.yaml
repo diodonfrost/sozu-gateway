@@ -54,6 +54,15 @@ spec:
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
+          # Readiness only de-pools the Pod from the Service; a wedged-but-alive
+          # proxy is never restarted by it. Liveness closes that gap (thresholds
+          # in line with the controller's below).
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
           volumeMounts:
             - name: sozu-run
               mountPath: /run/sozu
