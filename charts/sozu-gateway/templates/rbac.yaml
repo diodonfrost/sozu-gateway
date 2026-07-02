@@ -36,6 +36,11 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gatewayclasses/status", "gateways/status", "httproutes/status"]
     verbs: ["update", "patch"]
+  # Problem reporting as Events on the owning Ingress/Gateway/HTTPRoute
+  # (kubectl describe). patch updates the series count of a repeated event.
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
 {{- if .Values.rbac.allowStatusWrites }}
   # Ingress status reporting. Off by default for least-privilege.
   - apiGroups: ["networking.k8s.io"]
