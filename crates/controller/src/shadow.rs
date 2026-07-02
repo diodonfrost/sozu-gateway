@@ -179,11 +179,18 @@ fn state_dump_is_nonempty(dump: &str) -> bool {
 /// JSON behind. A torn shadow would parse-fail on restart and fall back to a
 /// full re-apply against a Sōzu that still holds state, which is exactly the
 /// divergence this file exists to avoid.
+///
+/// TLS private keys are stripped before writing: the previous side of a diff
+/// only ever needs a certificate's public identity (PEM → fingerprint, SNI
+/// names, listener) — Add/Replace requests are always built from the freshly
+/// built *desired* IR, whose keys come straight from the Secrets. Persisting
+/// keys would put every tenant's private key at rest on the shared volume for
+/// zero functional benefit.
 pub fn persist(shadow_file: &str, shadow: &Ir) {
     if shadow_file.is_empty() {
         return;
     }
-    let bytes = match serde_json::to_vec(shadow) {
+    let bytes = match serde_json::to_vec(&redact_private_keys(shadow)) {
         Ok(bytes) => bytes,
         Err(e) => {
             warn!(error = %e, "failed to serialize shadow");
@@ -198,6 +205,18 @@ pub fn persist(shadow_file: &str, shadow: &Ir) {
         // Best-effort cleanup so a failed attempt leaves no stale temp behind.
         let _ = std::fs::remove_file(&tmp_file);
     }
+}
+
+/// The shadow with every certificate's private key blanked — what [`persist`]
+/// actually writes. A reloaded key-less shadow still identifies its
+/// certificates (the diff works on fingerprints computed from the public PEM),
+/// so it diffs cleanly against a freshly built desired IR.
+fn redact_private_keys(shadow: &Ir) -> Ir {
+    let mut redacted = shadow.clone();
+    for cert in &mut redacted.certificates {
+        cert.key = String::new();
+    }
+    redacted
 }
 
 /// Write `bytes` to `tmp_file`, fsync it, then rename it over `target` (an
@@ -332,6 +351,65 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// A real (test-fixture) certificate, so the translator can fingerprint it.
+    const CERT_A: &str = include_str!("../../translator/tests/fixtures/cert_a.pem");
+    const KEY_A: &str = include_str!("../../translator/tests/fixtures/key_a.pem");
+
+    fn ir_with_certificate() -> Ir {
+        Ir {
+            certificates: vec![sozu_gw_ir::Certificate {
+                listener: "0.0.0.0:8443".parse().expect("addr"),
+                certificate: CERT_A.to_string(),
+                chain: vec![],
+                key: KEY_A.to_string(),
+                names: vec!["app.example.com".to_string()],
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn persisted_shadow_contains_no_private_key_material() {
+        let file =
+            std::env::temp_dir().join(format!("sozu-gw-shadow-redact-{}.json", std::process::id()));
+        let path = file.to_str().expect("utf-8 temp path");
+
+        persist(path, &ir_with_certificate());
+
+        let raw = std::fs::read_to_string(&file).expect("shadow file present");
+        assert!(
+            !raw.contains("PRIVATE KEY"),
+            "no private-key material may reach the persisted shadow"
+        );
+        let back: Ir = serde_json::from_str(&raw).expect("persisted shadow parses");
+        assert!(back.certificates[0].key.is_empty());
+        assert_eq!(
+            back.certificates[0].certificate, CERT_A,
+            "the public identity must survive redaction"
+        );
+
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn a_reloaded_keyless_shadow_diffs_cleanly_against_the_desired_ir() {
+        // Simulate a controller restart: the persisted (key-less) shadow is
+        // reloaded and diffed against a freshly built IR that carries the key.
+        // Nothing changed, so the diff must be empty — proving the previous
+        // side never needs the private key.
+        let desired = ir_with_certificate();
+        let reloaded: Ir =
+            serde_json::from_str(&serde_json::to_string(&redact_private_keys(&desired)).unwrap())
+                .expect("redacted shadow parses");
+
+        let requests = sozu_gw_translator::reconcile(&reloaded, &desired)
+            .expect("a key-less previous side must not fail the diff");
+        assert!(
+            requests.is_empty(),
+            "an unchanged cert must yield no requests: {requests:?}"
+        );
     }
 
     #[test]
