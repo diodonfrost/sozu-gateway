@@ -41,22 +41,6 @@ expression: add
   },
   {
     "request_type": {
-      "ACTIVATE_LISTENER": {
-        "address": {
-          "ip": {
-            "inner": {
-              "V4": 0
-            }
-          },
-          "port": 5432
-        },
-        "proxy": 2,
-        "from_scm": false
-      }
-    }
-  },
-  {
-    "request_type": {
       "ADD_CLUSTER": {
         "cluster_id": "pg",
         "sticky_session": false,

@@ -386,7 +386,12 @@ fn tier(req: &Request) -> u8 {
         Some(RequestType::RemoveBackend(_)) => 7,
         Some(RequestType::RemoveCluster(_)) => 8,
         Some(RequestType::RemoveCertificate(_)) => 9,
-        Some(RequestType::DeactivateListener(_)) | Some(RequestType::RemoveListener(_)) => 10,
+        // Listener teardown: deactivate before remove — the order Sōzu itself
+        // emits. Explicit consecutive tiers so the order can never silently
+        // flip on the lexicographic accident of the serialized request names
+        // (the within-tier sort key is the JSON encoding).
+        Some(RequestType::DeactivateListener(_)) => 10,
+        Some(RequestType::RemoveListener(_)) => 11,
         _ => 100,
     }
 }
@@ -566,5 +571,11 @@ pub fn reconcile(previous: &ir::Ir, desired: &ir::Ir) -> Result<Vec<Request>, Tr
         &previous.certificates,
         &desired.certificates,
     )?);
-    Ok(canonicalize(drop_superseded_backend_removes(requests)))
+    let mut requests = canonicalize(drop_superseded_backend_removes(requests));
+    // `ConfigState::diff` emits the activation of a newly-added active TCP/UDP
+    // listener twice (once inline, once in its trailing activation sweep).
+    // After `canonicalize` the batch is fully sorted, so identical requests
+    // are adjacent and the duplicate collapses here.
+    requests.dedup();
+    Ok(requests)
 }

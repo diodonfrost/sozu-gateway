@@ -576,9 +576,15 @@ fn reconcile_adds_then_removes_l4_route() {
     assert!(add
         .iter()
         .any(|r| matches!(r.request_type, Some(RequestType::AddTcpListener(_)))));
-    assert!(add
-        .iter()
-        .any(|r| matches!(r.request_type, Some(RequestType::ActivateListener(_)))));
+    // ConfigState::diff emits the activation of a new active listener twice
+    // (inline + trailing sweep); exactly one may survive the reconcile.
+    assert_eq!(
+        add.iter()
+            .filter(|r| matches!(r.request_type, Some(RequestType::ActivateListener(_))))
+            .count(),
+        1,
+        "a new listener must be activated exactly once: {add:#?}"
+    );
     assert!(add
         .iter()
         .any(|r| matches!(r.request_type, Some(RequestType::AddTcpFrontend(_)))));
@@ -587,12 +593,24 @@ fn reconcile_adds_then_removes_l4_route() {
     // Re-applying the same state is a no-op.
     assert!(tr::reconcile(&model, &model).expect("idem").is_empty());
 
-    // model -> empty: the frontend and listener are torn down.
+    // model -> empty: the frontend and listener are torn down, and the
+    // listener is deactivated *before* it is removed (Sōzu's own teardown
+    // order — pinned by explicit tiers, not by request-name sort order).
     let rm = tr::reconcile(&model, &ir::Ir::default()).expect("reconcile rm");
     assert!(rm
         .iter()
         .any(|r| matches!(r.request_type, Some(RequestType::RemoveTcpFrontend(_)))));
-    assert!(rm
+    let deactivate_idx = rm
         .iter()
-        .any(|r| matches!(r.request_type, Some(RequestType::RemoveListener(_)))));
+        .position(|r| matches!(r.request_type, Some(RequestType::DeactivateListener(_))))
+        .expect("a DeactivateListener for the torn-down listener");
+    let remove_idx = rm
+        .iter()
+        .position(|r| matches!(r.request_type, Some(RequestType::RemoveListener(_))))
+        .expect("a RemoveListener for the torn-down listener");
+    assert!(
+        deactivate_idx < remove_idx,
+        "the listener must be deactivated before it is removed, \
+         got deactivate at {deactivate_idx}, remove at {remove_idx}: {rm:#?}"
+    );
 }
