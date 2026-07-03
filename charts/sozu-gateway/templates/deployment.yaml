@@ -49,9 +49,10 @@ spec:
           imagePullPolicy: {{ .Values.image.sozu.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
-            # Sōzu only writes its socket/pid under /run/sozu — a mounted
-            # volume — so the root filesystem can be sealed like the
-            # controller's.
+            # Sōzu writes its socket/pid under /run/sozu and — when forking a
+            # worker — serializes its state through a temporary file in /tmp;
+            # both are explicit mounted volumes below, so the root filesystem
+            # itself can be sealed like the controller's.
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
@@ -80,6 +81,10 @@ spec:
               mountPath: /run/sozu
             - name: sozu-config
               mountPath: /etc/sozu
+            # Worker forks fail on a sealed rootfs without it: the state
+            # handoff to the new worker goes through a temp file in /tmp.
+            - name: sozu-tmp
+              mountPath: /tmp
           resources:
             {{- toYaml .Values.resources.sozu | nindent 12 }}
         # --- control plane ----------------------------------------------------
@@ -182,6 +187,11 @@ spec:
         # persisted shadow and Sōzu state dumps — material that must die with
         # the pod instead of lingering on the node's filesystem.
         - name: sozu-run
+          emptyDir:
+            medium: Memory
+        # Sōzu's scratch space for the worker-fork state handoff (short-lived
+        # temp files; same in-RAM, dies-with-the-pod reasoning as sozu-run).
+        - name: sozu-tmp
           emptyDir:
             medium: Memory
         - name: sozu-config
