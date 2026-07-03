@@ -62,18 +62,58 @@ ensure_gateway_api_crds() {
   echo "==> Gateway API CRDs (v1.2.1 standard channel)"
   kubectl apply -f \
     "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml" >/dev/null
-  kubectl wait --for=condition=Established \
-    crd/httproutes.gateway.networking.k8s.io --timeout=60s >/dev/null
+  # On the very first install `kubectl wait` can race the apiserver: it errors
+  # out on a still-nil .status.conditions instead of waiting. Retry briefly.
+  for _ in 1 2 3 4 5; do
+    kubectl wait --for=condition=Established \
+      crd/httproutes.gateway.networking.k8s.io --timeout=60s >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  echo "FAIL: Gateway API CRDs never became Established" >&2
+  return 1
 }
 
 ensure_demo_ns() {
   kubectl create namespace "$DEMO_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 }
 
-# Port-forward to the gateway Service; args are `local:remote` port pairs. Sets
-# PF_PID and installs an EXIT trap that kills it.
+# Port-forward to the gateway; args are `local:remote` port pairs. Sets PF_PID
+# and installs an EXIT trap that kills it.
+#
+# Targets a *Ready* pod explicitly instead of `svc/`: right after a rolling
+# update, `kubectl port-forward svc/...` can attach to a Terminating or
+# not-yet-ready pod (it picks the first selector match, ignoring readiness),
+# which makes the suite probe a proxy that is already being torn down.
 pf_start() {
-  kubectl -n "$NS" port-forward "svc/$RELEASE" "$@" >/tmp/sozu-e2e-pf.log 2>&1 &
+  local pod pair local_port svc_port target
+  local pairs=()
+  pod=$(kubectl -n "$NS" get pods \
+    -l "app.kubernetes.io/instance=$RELEASE" \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+    | awk '$2 == "True" { print $1; exit }')
+  if [ -z "$pod" ]; then
+    echo "FAIL: no Ready gateway pod to port-forward to" >&2
+    exit 1
+  fi
+  # The callers speak in *Service* ports; forwarding to a pod bypasses the
+  # Service's port mapping, so resolve each port through the Service's
+  # targetPort (and, when that is a name, through the pod's container ports).
+  for pair in "$@"; do
+    local_port="${pair%%:*}"
+    svc_port="${pair##*:}"
+    target=$(kubectl -n "$NS" get svc "$RELEASE" \
+      -o jsonpath="{.spec.ports[?(@.port==$svc_port)].targetPort}")
+    if ! [[ "$target" =~ ^[0-9]+$ ]]; then
+      target=$(kubectl -n "$NS" get pod "$pod" \
+        -o jsonpath="{.spec.containers[*].ports[?(@.name==\"$target\")].containerPort}")
+    fi
+    if [ -z "$target" ]; then
+      echo "FAIL: could not resolve Service port $svc_port to a container port" >&2
+      exit 1
+    fi
+    pairs+=("${local_port}:${target}")
+  done
+  kubectl -n "$NS" port-forward "pod/$pod" "${pairs[@]}" >/tmp/sozu-e2e-pf.log 2>&1 &
   PF_PID=$!
   trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
   sleep 3
