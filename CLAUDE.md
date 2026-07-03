@@ -23,8 +23,11 @@ just test           # cargo test --workspace (unit + golden/snapshot tests)
 just lint           # cargo fmt --check + clippy -D warnings (the CI gate)
 just fmt            # cargo fmt (write)
 just image          # docker build the controller image
-just chart-lint     # helm lint + template (also renders with rbac.allowStatusWrites=true)
-just e2e            # full in-cluster end-to-end on the current kube-context
+just chart-lint     # helm lint + template (also rbac.allowStatusWrites + metrics/ServiceMonitor)
+just e2e            # in-cluster end-to-end (Ingress + TLS) on the current kube-context
+just e2e-gateway    # Gateway API + HTTPRoute filters (header/redirect) end-to-end
+just e2e-l4         # raw TCP (L4) forwarding end-to-end
+just e2e-all        # every e2e suite, sharing one freshly-built image
 ```
 
 - **`protoc` is required to build** — `sozu-command-lib`'s `build.rs` runs `prost-build`. The
@@ -38,6 +41,8 @@ just e2e            # full in-cluster end-to-end on the current kube-context
 - The [justfile](justfile) is authoritative for task/command names (`image`, `chart-lint`,
   `chart-package`, `e2e`, …); keep the README in sync with it. Override variables before the
   recipe, e.g. `just IMAGE=my/repo TAG=v0.2.0 image`.
+- The e2e scripts default to an ephemeral `ttl.sh` image (build + push), so no registry
+  credentials are needed — just a working kube-context.
 
 ## Architecture
 
@@ -62,21 +67,29 @@ all socket/kube-client I/O lives in `sozu-agent` and `controller`.
 ### How the reconcile loop works (`controller/src/main.rs`)
 
 One **singleton, global** reconcile — not per-object. Reflector caches for Ingress, IngressClass,
-Service, EndpointSlice, Secret — and, when the Gateway API CRDs are present, GatewayClass, Gateway,
-HTTPRoute, ReferenceGrant — each ping a single mpsc channel on any change; a debounced
+Service, EndpointSlice, Secret (field-selected to `type=kubernetes.io/tls`) — and, when the
+Gateway API CRDs are present, GatewayClass, Gateway, HTTPRoute, ReferenceGrant — each ping a
+single mpsc channel on any change (EndpointSlice pings are pre-filtered to services some route
+actually references); a debounced
 (`SOZU_GW_DEBOUNCE_MS`) reconcile rebuilds the *entire* desired IR from the caches, diffs it
 against an in-memory **shadow** (the last successfully-applied `Ir`), and applies only the delta.
 A periodic resync (`SOZU_GW_RESYNC_SECS`) self-heals drift.
 
-- The shadow advances **only on a fully successful apply**. On failure it stays put; because every
-  emitted request is idempotent, re-diffing from the unchanged shadow converges.
+- The shadow advances **only on a fully successful apply**. On failure it stays put, and
+  re-diffing from the unchanged shadow converges — NOT because the requests are idempotent
+  (frontend/listener `Add*` verbs reject duplicates with `StateError::Exists`), but because
+  `AddCluster`/`AddBackend` upsert and the agent tolerates already-gone teardowns and *repairs*
+  duplicate frontend adds (remove + re-add on the same route key; see `sozu-agent`).
 - **Fail-fast philosophy:** if a watch stream ends or caches don't sync within the timeout, the
   process exits so Kubernetes restarts it rather than silently going blind. Never `panic!`.
 - The shadow is **persisted** to the shared volume (`--shadow-file`, default `/run/sozu/shadow.json`)
   on every successful apply and reloaded at startup, so restarting *only* the controller resumes from
   the real baseline and still prunes orphans. It reloads the file **only when Sōzu still holds state**
   (probed via `save_state`): if Sōzu itself restarted (empty), the stale shadow is ignored and the
-  full state is re-applied, so a fresh Sōzu is never left unprogrammed.
+  full state is re-applied, so a fresh Sōzu is never left unprogrammed. Mid-life, a Sōzu restart
+  under a live controller is detected by its **worker-PID generation** (checked on every resync
+  tick, pending reconnect, and post-apply reconnect); a changed generation resets the shadow so
+  the next reconcile re-applies everything — an emptiness probe would be raceable there.
 
 ### Translator diff strategy — the subtle part
 
@@ -104,7 +117,9 @@ golden snapshots.
 `--schema=disabled`; regenerate per its README — do not hand-edit). The builder's
 [`gateway` module](crates/builder/src/gateway.rs) maps GatewayClass/Gateway/HTTPRoute through the
 **same** Service→pod-IP resolver and into the **same** IR as Ingress (a route and an Ingress to one
-Service share a cluster). Gateway listeners map to the static `:80`/`:443` by protocol; cross-ns
+Service share a cluster). Gateway listeners map to the static listeners by protocol and must
+declare the **advertised** ports (default `80`/`443`, `--gateway-http(s)-port` — the Service's
+client-facing ports, wired by the chart; a mismatch is rejected with `PortUnavailable`); cross-ns
 refs are gated on ReferenceGrant. Anything Sōzu can't represent (weighted multi-backend split,
 header/query matches, TLS passthrough) is reported as a `Problem` and skipped, never approximated.
 
@@ -124,6 +139,19 @@ The CRDs are **optional**: the controller probes for them and runs Ingress-only 
 (`Accepted`/`Programmed`/`ResolvedRefs`) is written by [`controller/src/status.rs`](crates/controller/src/status.rs),
 which is **loop-safe** — it reuses `lastTransitionTime` for unchanged conditions and skips no-op
 patches, so the controller's own status writes never re-trigger it. Status writes are best-effort.
+`Problem`s also surface to users: as the detail in `False` condition messages, and as Warning
+**Events** on the owning Ingress/Gateway/HTTPRoute ([`controller/src/events.rs`](crates/controller/src/events.rs),
+diffed against the previous pass so resyncs never flood etcd).
+
+**Conformance is a documented partial, by design.** The official Gateway API v1.2.1 `GATEWAY-HTTP`
+suite passes 16/33 core tests (report: [docs/conformance/](docs/conformance/), analysis:
+[docs/E2E-RESULTS.md](docs/E2E-RESULTS.md) §6; the recorded score predates the `Selector`
+fail-closed change — a re-run is pending). The profile **cannot fully pass** on Sōzu (no
+weighted splits, no header/query matching, …), so don't chase the "Conformant" badge — and don't
+read the recorded failures as regressions: several (hostname/path-matching tests) route correctly
+by hand but fail on a base-setup cert-timing gate. [docs/features.md](docs/features.md) is the
+user-facing support matrix (supported / planned / not supported); keep it in sync when support
+changes.
 
 ### Conventions that matter
 
@@ -142,14 +170,16 @@ patches, so the controller's own status writes never re-trigger it. Status write
 - **Metrics are pulled, not pushed.** Sōzu has no native `/metrics`; the controller serves one
   (opt-in, `--metrics-listen` / Helm `metrics.enabled`) by issuing a `QueryMetrics` over the command
   socket on each scrape and rendering the returned `AggregatedMetrics` with the pure
-  [`prometheus` crate](crates/prometheus). It is best-effort and orthogonal to routing: a socket
+  [`prometheus` crate](crates/prometheus), prefixed by the controller's own health signals
+  (`sozu_gw_controller_*`, incl. the last-successful-reconcile timestamp — the staleness alert).
+  It is best-effort and orthogonal to routing: a socket
   error returns `503`, never a panic. Sōzu's histogram buckets are already cumulative (`le`), so they
   map straight onto Prometheus `_bucket`; `Percentiles` become a `summary` (Sōzu only max-merges them
   across workers — the companion `*_histogram` is the accurate aggregate).
 - The Sōzu command socket takes a **bare length-prefixed `Request`**; replies come back as
   `Processing` → `Ok`/`Failure`, so every send loops until a terminal status. This protocol is
   **verified against a live Sōzu**, documented in [PROTOCOL.md](PROTOCOL.md) (the source of truth
-  for the translator), with raw research notes in `.scratch/recon/`. Never reimplement the wire
+  for the translator). Never reimplement the wire
   format or invent protobuf fields — reuse the crate's types and conversions
   (e.g. `addr.into()`, never hand-pack an address).
 
@@ -175,7 +205,7 @@ and the Helm chart (`oci://ghcr.io/clevercloud/sozu-gateway`) via
 
 ## Working notes
 
-- `.scratch/` is research/probe scaffolding (live-Sōzu protocol probes, recon notes), not part of
-  the shipped product.
+- `.scratch/` is local research/probe scaffolding (live-Sōzu protocol probes, recon notes behind
+  PROTOCOL.md). It is gitignored, so it may not exist in a fresh clone; never rely on it.
 - Errors: typed per-crate with `thiserror`; `anyhow` only in the controller binary.
 - Code, comments, and docs are in English.
